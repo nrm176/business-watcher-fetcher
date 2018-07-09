@@ -3,3 +3,4 @@ numpy
 requests
 sqlalchemy
 psycopg2
+psycopg2-binary

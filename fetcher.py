@@ -5,6 +5,9 @@ import numpy as np
 import requests
 import io
 import csv
+from os.path import join, dirname
+import os
+from sqlalchemy import create_engine
 
 keys = ['◎', '○', '□', '▲', '×']
 values = [1.0, 0.75, 0.5, 0.25, 0.0]
@@ -12,7 +15,7 @@ CONVERTER_MAP = {}
 
 for k, v in zip(keys, values):
     CONVERTER_MAP[k] = v
-print(CONVERTER_MAP)
+
 
 def to_csv(data, file=None):
     if file:
@@ -22,8 +25,8 @@ def to_csv(data, file=None):
             for row in reader:
                 writer.writerow(row)
 
-def create_dataframe(data, date, data_type='current'):
 
+def create_dataframe(data, date, data_type='current'):
     df = pd.read_csv(io.StringIO(data), header=7, encoding="utf-8")
     df.rename(columns={'Unnamed: 1': '都道府県'}, inplace=True)
     # remove new line and \u3000
@@ -69,7 +72,6 @@ def create_dataframe(data, date, data_type='current'):
     df['業種詳細'] = list(map(lambda x: spliter(x, '［', '］') if type(x) == str else x, df['業種']))
     df['業種'] = list(map(lambda x: x.split('［')[0] if type(x) == str and '［' in x else x, df['業種']))
 
-
     if data_type == 'current':
         df['追加説明及び具体的状況の説明'] = list(map(lambda x: x.replace('・', '') if type(x) == str else x, df['追加説明及び具体的状況の説明']))
         df = df[df['判断の理由'] != '＊']
@@ -79,11 +81,8 @@ def create_dataframe(data, date, data_type='current'):
         df = df[df['景気の先行きに対する判断理由'] != '＊']
         df = df[df['景気の先行きに対する判断理由'] != '−']
 
-
-
     # drop a row by condition
     df = df.dropna(thresh=4)
-
 
     # 業種・職種は別々のカラムを作ったので不要
     df = df.drop('業種・職種', 1)
@@ -100,12 +99,12 @@ def create_dataframe(data, date, data_type='current'):
 
     df['日付'] = date
 
-
-    df['Id']= generateHash(df)
+    df['Id'] = generateHash(df)
 
     df = df.set_index('Id')
 
     return df
+
 
 def generateHash(df):
     hashes = []
@@ -136,18 +135,38 @@ def retrieve_csv_file(url):
 
 if __name__ == '__main__':
 
+    file_path = '/tmp/%s_%s.csv'
+    if not os.environ.get("ON_HEROKU"):
+        from dotenv import load_dotenv
+
+        dotenv_path = join(dirname(__file__), '.env')
+        load_dotenv(dotenv_path)
+        file_path = './%s_%s.csv'
+
+    DATABASE_URL = os.environ["DATABASE_URL"]
+
     # today = datetime.strftime(datetime.today() + timedelta(days=1), '%Y-%m-%d')
     today = datetime.strftime(datetime.today(), '%Y-%m-%d')
 
     url_dict = {
-        'outlook' : 'http://www5.cao.go.jp/keizai3/%s/%s%swatcher/watcher5.csv' % tuple(today.split('-')),
-        'current' : 'http://www5.cao.go.jp/keizai3/%s/%s%swatcher/watcher4.csv' % tuple(today.split('-'))
+        'outlook': 'http://www5.cao.go.jp/keizai3/%s/%s%swatcher/watcher5.csv' % tuple(today.split('-')),
+        'current': 'http://www5.cao.go.jp/keizai3/%s/%s%swatcher/watcher4.csv' % tuple(today.split('-'))
     }
 
+    dfs = []
     for data_type, url in url_dict.items():
         d = retrieve_csv_file(url)
         if d:
             df = create_dataframe(d, date=today, data_type=data_type)
-            df.to_csv('./%s_%s.csv' % (data_type, today), encoding='utf-8')
+            dfs.append(df)
+            # df.to_csv('./%s_%s.csv' % (data_type, today), encoding='utf-8')
         else:
             print('%s not available' % url)
+
+    append_df = dfs[0].append(dfs[1], sort=False)
+    # concat_df = pd.concat(dfs, axis=1)
+
+    append_df.to_csv(file_path % ('append', today), encoding='utf-8')
+
+    engine = create_engine(DATABASE_URL)
+    append_df.to_sql(os.environ['BUSINESS_WATCHER_BOT_TABLE_NAME'], engine, if_exists='append')

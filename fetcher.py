@@ -84,13 +84,6 @@ def create_dataframe(data, date, data_type='current'):
     # drop a row by condition
     df = df.dropna(thresh=4)
 
-    # if data_type == '現状':
-    #     df = df[df['判断の理由'] != '＊']
-    #     df = df[df['判断の理由'] != '−']
-    # else:
-    #     df = df[df['景気の先行きに対する判断理由'] != '＊']
-    #     df = df[df['景気の先行きに対する判断理由'] != '−']
-
 
     # 業種・職種は別々のカラムを作ったので不要
     df = df.drop('業種・職種', 1)

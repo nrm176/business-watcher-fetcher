@@ -222,7 +222,7 @@ if __name__ == '__main__':
     MANUAL_RUN = True
 
     if MANUAL_RUN:
-        dt_str = '20180808'
+        dt_str = '20180709'
         today_dt = datetime.strptime(dt_str, '%Y%m%d')
         today = datetime.strftime(today_dt, '%Y-%m-%d')
     else:
@@ -236,7 +236,7 @@ if __name__ == '__main__':
     if len(dfs) > 1:
         append_df = clean_data_frame(dfs)
 
-        if ON_HEROKU:
+        if not ON_HEROKU:
             engine = create_engine(DATABASE_URL)
             try:
                 append_df.to_sql(os.environ['BUSINESS_WATCHER_BOT_TABLE_NAME'], engine, if_exists='append')

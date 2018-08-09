@@ -8,10 +8,18 @@ import csv
 from os.path import join, dirname
 import os
 from sqlalchemy import create_engine
+from dotenv import load_dotenv
 
 keys = ['◎', '○', '□', '▲', '×']
 values = [1.0, 0.75, 0.5, 0.25, 0.0]
 CONVERTER_MAP = {}
+
+RENAME_COLUMNS = {'Id' : 'id', 'タイプ' : 'dtype', '分野' : 'category',
+                  '判断の理由' : 'reason', '地域' : 'region', '日付' : 'dt',
+                  '景気の先行きに対する判断理由' : 'reason_future', '景気の先行き判断' : 'score_future', '景気の現状判断' : 'score_current',
+                  '業種' : 'industry', '業種詳細': 'industry_detail', '職種' : 'job_title', '追加説明及び具体的状況の説明': 'comments',
+                  '都道府県' : 'pref'}
+
 
 for k, v in zip(keys, values):
     CONVERTER_MAP[k] = v
@@ -101,7 +109,9 @@ def create_dataframe(data, date, data_type='current'):
 
     df['Id'] = generateHash(df)
 
-    df = df.set_index('Id')
+    df = df.rename(columns=RENAME_COLUMNS)
+
+    df = df.set_index('id')
 
     return df
 
@@ -135,18 +145,17 @@ def retrieve_csv_file(url):
 
 if __name__ == '__main__':
 
-    file_path = '/tmp/%s_%s.csv'
-    if not os.environ.get("ON_HEROKU"):
-        from dotenv import load_dotenv
+    ON_HEROKU = os.environ.get("ON_HEROKU", False)
 
+    file_path = '/tmp/%s_%s.csv' if ON_HEROKU else './%s_%s.csv'
+    if not ON_HEROKU:
         dotenv_path = join(dirname(__file__), '.env')
         load_dotenv(dotenv_path)
-        file_path = './%s_%s.csv'
 
     DATABASE_URL = os.environ["DATABASE_URL"]
 
-    # today = datetime.strftime(datetime.today() + timedelta(days=1), '%Y-%m-%d')
-    today = datetime.strftime(datetime.today(), '%Y-%m-%d')
+    today = datetime.strftime(datetime.today() - timedelta(days=1), '%Y-%m-%d')
+    # today = datetime.strftime(datetime.today(), '%Y-%m-%d')
 
     url_dict = {
         'outlook': 'http://www5.cao.go.jp/keizai3/%s/%s%swatcher/watcher5.csv' % tuple(today.split('-')),
@@ -166,7 +175,8 @@ if __name__ == '__main__':
     append_df = dfs[0].append(dfs[1], sort=False)
     # concat_df = pd.concat(dfs, axis=1)
 
-    append_df.to_csv(file_path % ('append', today), encoding='utf-8')
-
-    engine = create_engine(DATABASE_URL)
-    append_df.to_sql(os.environ['BUSINESS_WATCHER_BOT_TABLE_NAME'], engine, if_exists='append')
+    if ON_HEROKU:
+        engine = create_engine(DATABASE_URL)
+        append_df.to_sql(os.environ['BUSINESS_WATCHER_BOT_TABLE_NAME'], engine, if_exists='append')
+    else:
+        append_df.to_csv(file_path % ('append', today), encoding='utf-8')

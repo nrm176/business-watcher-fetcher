@@ -219,21 +219,28 @@ if __name__ == '__main__':
 
     DATABASE_URL = os.environ["DATABASE_URL"]
 
-    today_dt = datetime.strptime(datetime.today(), '%Y%m%d')
+    MANUAL_RUN = True
 
-    today = datetime.strftime(today_dt, '%Y-%m-%d')
+    if MANUAL_RUN:
+        dt_str = '20180808'
+        today_dt = datetime.strptime(dt_str, '%Y%m%d')
+        today = datetime.strftime(today_dt, '%Y-%m-%d')
+    else:
+        today_dt = datetime.strptime(datetime.today(), '%Y%m%d')
+        today = datetime.strftime(today_dt, '%Y-%m-%d')
 
     url_dict = construct_urls(today)
 
-    dfs = construct_data_frame(url_dict)
+    dfs = construct_data_frame(url_dict, today_dt)
 
     if len(dfs) > 1:
-        append_df = clean_data_frame(dfs, today_dt)
+        append_df = clean_data_frame(dfs)
 
         if ON_HEROKU:
             engine = create_engine(DATABASE_URL)
             try:
                 append_df.to_sql(os.environ['BUSINESS_WATCHER_BOT_TABLE_NAME'], engine, if_exists='append')
+                logger.debug('records as of {0} have been saved to Heroku postgres'.format(today))
             except Exception  as e:
                 logger.error('error on insert: {0}'.format(e))
         else:

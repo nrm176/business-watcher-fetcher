@@ -206,6 +206,10 @@ def construct_data_frame(url_dict, today_dt):
 
     return dfs
 
+def to_yyyy_mm_dd(dt_str):
+    today_dt = datetime.strptime(dt_str, '%Y%m%d')
+    today = datetime.strftime(today_dt, '%Y-%m-%d')
+    return today
 
 if __name__ == '__main__':
 
@@ -222,7 +226,7 @@ if __name__ == '__main__':
     MANUAL_RUN = True
 
     if MANUAL_RUN:
-        dt_str = '20180808'
+        dt_str = '20190208'
         today_dt = datetime.strptime(dt_str, '%Y%m%d')
         today = datetime.strftime(today_dt, '%Y-%m-%d')
     else:
@@ -233,11 +237,12 @@ if __name__ == '__main__':
 
     dfs = construct_data_frame(url_dict, today_dt)
 
-    if len(dfs) > 1:
+    if len(dfs) >= 1:
         append_df = clean_data_frame(dfs)
+        engine = create_engine(DATABASE_URL)
 
         if ON_HEROKU:
-            engine = create_engine(DATABASE_URL)
+            # engine = create_engine(DATABASE_URL)
             try:
                 append_df.to_sql(os.environ['BUSINESS_WATCHER_BOT_TABLE_NAME'], engine, if_exists='append')
                 logger.debug('records as of {0} have been saved to Heroku postgres'.format(today))
@@ -245,4 +250,5 @@ if __name__ == '__main__':
                 logger.error('error on insert: {0}'.format(e))
         else:
             append_df.to_csv(file_path % ('append', today), encoding='utf-8')
+            append_df.to_sql(os.environ['BUSINESS_WATCHER_BOT_TABLE_NAME'], engine, if_exists='append')
             logger.debug('saving at %s' % file_path % ('append', today))

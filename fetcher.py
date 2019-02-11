@@ -43,8 +43,8 @@ def to_csv(data, file=None):
                 writer.writerow(row)
 
 
-def create_dataframe(data, date, data_type='current'):
-    df = pd.read_csv(io.StringIO(data), header=7, encoding="utf-8")
+def create_dataframe(data, date, header_skip, pattern, region):
+    df = pd.read_csv(io.StringIO(data), header=header_skip, encoding="utf-8")
     df.rename(columns={'Unnamed: 1': '都道府県'}, inplace=True)
     # remove new line and \u3000
     df['分野'] = list(map(lambda x: x.replace('\n', '').replace('\u3000', '') if type(x) == str else x, df['分野']))
@@ -55,7 +55,7 @@ def create_dataframe(data, date, data_type='current'):
 
     # 下記のwordが入っている行はnanとする
 
-    if data_type == 'current':
+    if pattern == 'current':
         words = ['景気の現状判断', '判断の理由', '追加説明及び具体的状況の説明', '業種・職種']
     else:
         words = ['景気の先行き判断', '景気の先行きに対する判断理由', '業種・職種']
@@ -73,7 +73,11 @@ def create_dataframe(data, date, data_type='current'):
     df.loc[:, '業種詳細'] = np.nan
     df.loc[:, '職種'] = np.nan
     # もともとの分野を括弧を元に分割する。分野と地域に別れる。
-    df['地域'] = list(map(lambda x: x.split('(')[1].replace(')', '') if type(x) == str else x, df['分野']))
+    if region == 'all':
+        df['地域'] = list(map(lambda x: x.split('(')[1].replace(')', '') if type(x) == str else x, df['分野']))
+    else:
+        df['地域'] = '甲信越'
+
     df['分野'] = list(map(lambda x: x.split('(')[0] if type(x) == str and '(' in x else x, df['分野']))
 
     df['業種'] = list(map(lambda x: x.split('（')[0] if type(x) == str and '（' in x else x, df['業種・職種']))
@@ -89,7 +93,7 @@ def create_dataframe(data, date, data_type='current'):
     df['業種詳細'] = list(map(lambda x: spliter(x, '［', '］') if type(x) == str else x, df['業種']))
     df['業種'] = list(map(lambda x: x.split('［')[0] if type(x) == str and '［' in x else x, df['業種']))
 
-    if data_type == 'current':
+    if pattern == 'current':
         df['追加説明及び具体的状況の説明'] = list(map(lambda x: x.replace('・', '') if type(x) == str else x, df['追加説明及び具体的状況の説明']))
         df = df[df['判断の理由'] != '＊']
         df = df[df['判断の理由'] != '−']
@@ -99,17 +103,18 @@ def create_dataframe(data, date, data_type='current'):
         df = df[df['景気の先行きに対する判断理由'] != '−']
 
     # drop a row by condition
-    df = df.dropna(thresh=4)
+    if region == 'all':
+        df = df.dropna(thresh=4)
 
     # 業種・職種は別々のカラムを作ったので不要
     df = df.drop('業種・職種', 1)
 
-    if data_type == 'current':
+    if pattern == 'current':
         df['景気の現状判断'] = list(map(lambda x: CONVERTER_MAP.get(x), df['景気の現状判断']))
     else:
         df['景気の先行き判断'] = list(map(lambda x: CONVERTER_MAP.get(x), df['景気の先行き判断']))
 
-    if data_type == 'current':
+    if pattern == 'current':
         df['タイプ'] = '現状'
     else:
         df['タイプ'] = '先行き'
@@ -158,11 +163,18 @@ def insert_everything():
 
 
 def construct_urls(today):
-    url_dict = {
-        'outlook': 'http://www5.cao.go.jp/keizai3/%s/%s%swatcher/watcher5.csv' % tuple(today.split('-')),
-        'current': 'http://www5.cao.go.jp/keizai3/%s/%s%swatcher/watcher4.csv' % tuple(today.split('-'))
-    }
-    return url_dict
+    return [
+        {'pattern': 'current',
+         'url': 'http://www5.cao.go.jp/keizai3/%s/%s%swatcher/watcher4.csv' % tuple(today.split('-')),
+         'header_skip': 7, 'region': 'all'},
+        {'pattern': 'outlook', 'url': 'http://www5.cao.go.jp/keizai3/%s/%s%swatcher/watcher5.csv' % tuple(today.split('-')),
+         'header_skip': 7, 'region': 'all'},
+        {'pattern': 'current', 'url': 'http://www5.cao.go.jp/keizai3/%s/%s%swatcher/watcher6.csv' % tuple(today.split('-')),
+         'header_skip': 2, 'region': 'koshinetsu'},
+        {'pattern': 'outlook',
+         'url': 'http://www5.cao.go.jp/keizai3/%s/%s%swatcher/watcher7.csv' % tuple(today.split('-')),
+         'header_skip': 2, 'region': 'koshinetsu'},
+    ]
 
 
 def clean_data_frame(dfs):
@@ -170,6 +182,7 @@ def clean_data_frame(dfs):
 
     # Remove unamed column
     append_df = append_df.loc[:, ~append_df.columns.str.contains('^Unnamed')]
+
 
     append_df["comments"] = append_df["reason_future"].apply(lambda x: '' if pd.isnull(x) else x) + append_df[
         "comments"].apply(lambda x: '' if pd.isnull(x) else x)
@@ -189,44 +202,33 @@ def clean_data_frame(dfs):
     return append_df
 
 
-def construct_data_frame(url_dict, today_dt):
+def construct_data_frame(urls, today_dt):
     dfs = []
-    for data_type, url in url_dict.items():
-        logger.debug('doing %s' % url)
+    for e in urls:
+        logger.debug('doing %s' % e['url'])
 
-        d = retrieve_csv_file(url)
+        d = retrieve_csv_file(e['url'])
         if d:
-            df = create_dataframe(d, date=today_dt, data_type=data_type)
+            df = create_dataframe(d, date=today_dt, header_skip=e['header_skip'], pattern=e['pattern'], region=e['region'])
             dfs.append(df)
         else:
-            logger.error('%s not available' % url)
+            logger.error('%s not available' % e['url'])
 
     if len(dfs) < 1:
         logger.error('df is empty')
 
     return dfs
 
+
 def to_yyyy_mm_dd(dt_str):
     today_dt = datetime.strptime(dt_str, '%Y%m%d')
     today = datetime.strftime(today_dt, '%Y-%m-%d')
     return today
 
-if __name__ == '__main__':
 
-    ON_HEROKU = os.environ.get("ON_HEROKU", False)
-
-    file_path = '/tmp/%s_%s.csv' if ON_HEROKU else './%s_%s.csv'
-
-    if not ON_HEROKU:
-        dotenv_path = join(dirname(__file__), '.env')
-        load_dotenv(dotenv_path)
-
-    DATABASE_URL = os.environ["DATABASE_URL"]
-
-    MANUAL_RUN = True
-
+def insert_data(target_date, MANUAL_RUN=True):
     if MANUAL_RUN:
-        dt_str = '20190208'
+        dt_str = target_date
         today_dt = datetime.strptime(dt_str, '%Y%m%d')
         today = datetime.strftime(today_dt, '%Y-%m-%d')
     else:
@@ -252,3 +254,25 @@ if __name__ == '__main__':
             append_df.to_csv(file_path % ('append', today), encoding='utf-8')
             append_df.to_sql(os.environ['BUSINESS_WATCHER_BOT_TABLE_NAME'], engine, if_exists='append')
             logger.debug('saving at %s' % file_path % ('append', today))
+
+
+if __name__ == '__main__':
+
+    ON_HEROKU = os.environ.get("ON_HEROKU", False)
+
+    file_path = '/tmp/%s_%s.csv' if ON_HEROKU else './%s_%s.csv'
+
+    if not ON_HEROKU:
+        dotenv_path = join(dirname(__file__), '.env')
+        load_dotenv(dotenv_path)
+
+    DATABASE_URL = os.environ["DATABASE_URL"]
+
+    target_dates = ['20100208']
+
+    for target_date in target_dates:
+        insert_data(target_date)
+
+    # TODO:
+    #   Step1. Run the script on heroku by doing ```heroku run python fetcher.py```
+    #   Step2. Make sure dt_str is when the data is released

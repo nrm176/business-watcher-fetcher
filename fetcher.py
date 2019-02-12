@@ -46,14 +46,8 @@ def to_csv(data, file=None):
 
 BASE_PATH = './historical_data/%s.%s.%s.csv'
 
-def create_dataframe(data, yyyymmdddate, date, header_skip, pattern, region):
-
-    csv_file = Path(BASE_PATH % (yyyymmdddate, pattern, region))
-    if not csv_file.exists():
-        return None
-
-    df = pd.read_csv(BASE_PATH % (yyyymmdddate, pattern, region) , header=header_skip, encoding="'shift_jisx0213'")
-    # df = pd.read_csv(io.StringIO(data), header=header_skip, encoding="utf-8")
+def create_dataframe(data, date, header_skip, pattern, region):
+    df = pd.read_csv(io.StringIO(data), header=header_skip, encoding="utf-8")
 
     df = df.replace('\n', '', regex=True)
     df.rename(columns={'Unnamed: 1': '都道府県'}, inplace=True)
@@ -250,7 +244,7 @@ def construct_data_frame_v2(e, today_dt):
     if d:
         logger.info('doing url: %s' % e['url'])
         df = create_dataframe(d, date=today_dt, header_skip=e['header_skip'], pattern=e['pattern'], region=e['region'])
-        if df:
+        if df is not None:
             df = clean_data_frame(df, pattern=e['pattern'], region=e['region'])
             return df
     else:
@@ -281,11 +275,11 @@ def insert_data(target_date, MANUAL_RUN=True):
         today_dt = datetime.strptime(datetime.today(), '%Y%m%d')
         today = datetime.strftime(today_dt, '%Y-%m-%d')
 
-    paths = construct_path()
+    urls = construct_urls(today)
 
     dfs = []
-    for path in paths:
-        dfs.append(construct_data_frame_v3(path, today, today_dt))
+    for url in urls:
+        dfs.append(construct_data_frame_v2(url, today_dt))
 
     if len(dfs) >= 1:
         append_df = pd.concat(dfs)
@@ -300,7 +294,7 @@ def insert_data(target_date, MANUAL_RUN=True):
                 logger.error('error on insert: {0}'.format(e))
         else:
             append_df.to_csv(file_path % ('append', today), encoding='utf-8')
-            append_df.to_sql(os.environ['BUSINESS_WATCHER_BOT_TABLE_NAME'], engine, if_exists='append')
+            # append_df.to_sql(os.environ['BUSINESS_WATCHER_BOT_TABLE_NAME'], engine, if_exists='append')
             logger.debug('saving at %s' % file_path % ('append', today))
 
     # TODO:
@@ -319,8 +313,7 @@ if __name__ == '__main__':
 
     DATABASE_URL = os.environ["DATABASE_URL"]
 
-    target_dates = ['20100208', '20100308', '20100408', '20100513', '20100608', '20100708', '20100809', '20100908', '20101008', '20101109', '20101208', '20110112', '20110208', '20110308', '20110408', '20110512', '20110608', '20110708', '20110808', '20110908', '20111011', '20111109', '20111208', '20120112', '20120208', '20120308', '20120409', '20120510', '20120608', '20120709', '20120808', '20120910', '20121009', '20121108', '20121210', '20130111', '20130208', '20130308', '20130408', '20130510', '20130610', '20130708', '20130808', '20130909', '20131008', '20131111', '20131209', '20140114', '20140210', '20140310', '20140408', '20140512', '20140609', '20140708', '20140808', '20140908', '20141008', '20141111', '20141208', '20150113', '20150209', '20150309', '20150408', '20150513', '20150608', '20150708', '20150810', '20150908', '20151008', '20151110', '20151208', '20160112', '20160208', '20160308', '20160408', '20160512', '20160608', '20160708', '20160808', '20160908', '20161011', '20161109', '20161208', '20170112', '20170208', '20170308', '20170410', '20170511', '20170608', '20170710', '20170808', '20170908', '20171010', '20171109', '20171208', '20180112', '20180208', '20180308', '20180409', '20180510', '20180608', '20180709', '20180808', '20180910', '20181009', '20181108', '20181210', '20190111', '20190208']
-
+    target_dates = ['20190208']
     for target_date in target_dates:
         insert_data(target_date)
 

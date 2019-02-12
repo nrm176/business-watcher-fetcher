@@ -23,7 +23,8 @@ logger.propagate = False
 keys = ['◎', '○', '□', '▲', '×']
 values = [1.0, 0.75, 0.5, 0.25, 0.0]
 CONVERTER_MAP = {}
-
+KOSHINETSU_CONVERTER_OUTLOOK_MAP = {'良くなる': 1.0, 'やや良くなる': 0.75, '変わらない': 0.5, 'やや悪くなる': 0.25, '悪くなる': 0.0}
+KOSHINETSU_CONVERTER_CURRENT_MAP = {'良くなっている': 1.0, 'やや良くなっている': 0.75, '変わらない': 0.5, 'やや悪くなっている': 0.25, '悪くなっている': 0.0}
 RENAME_COLUMNS = {'Id': 'id', 'タイプ': 'dtype', '分野': 'category',
                   '判断の理由': 'reason', '地域': 'region', '日付': 'dt',
                   '景気の先行きに対する判断理由': 'reason_future', '景気の先行き判断': 'score_future', '景気の現状判断': 'score_current',
@@ -45,6 +46,7 @@ def to_csv(data, file=None):
 
 def create_dataframe(data, date, header_skip, pattern, region):
     df = pd.read_csv(io.StringIO(data), header=header_skip, encoding="utf-8")
+    df = df.replace('\n', '', regex=True)
     df.rename(columns={'Unnamed: 1': '都道府県'}, inplace=True)
     # remove new line and \u3000
     df['分野'] = list(map(lambda x: x.replace('\n', '').replace('\u3000', '') if type(x) == str else x, df['分野']))
@@ -106,13 +108,25 @@ def create_dataframe(data, date, header_skip, pattern, region):
     if region == 'all':
         df = df.dropna(thresh=4)
 
+    if region == 'koshinetsu':
+        df = df.dropna(thresh=5)
+
     # 業種・職種は別々のカラムを作ったので不要
     df = df.drop('業種・職種', 1)
 
-    if pattern == 'current':
-        df['景気の現状判断'] = list(map(lambda x: CONVERTER_MAP.get(x), df['景気の現状判断']))
+    # 甲信越はスコア表記が他の地域と違う
+    if region == 'koshinetsu':
+        if pattern == 'current':
+            df['景気の現状判断'] = df['景気の現状判断'].fillna(method='ffill')
+            df['景気の現状判断'] = list(map(lambda x: KOSHINETSU_CONVERTER_CURRENT_MAP.get(x), df['景気の現状判断']))
+        else:
+            df['景気の先行き判断'] = df['景気の先行き判断'].fillna(method='ffill')
+            df['景気の先行き判断'] = list(map(lambda x: KOSHINETSU_CONVERTER_OUTLOOK_MAP.get(x), df['景気の先行き判断']))
     else:
-        df['景気の先行き判断'] = list(map(lambda x: CONVERTER_MAP.get(x), df['景気の先行き判断']))
+        if pattern == 'current':
+            df['景気の現状判断'] = list(map(lambda x: CONVERTER_MAP.get(x), df['景気の現状判断']))
+        else:
+            df['景気の先行き判断'] = list(map(lambda x: CONVERTER_MAP.get(x), df['景気の先行き判断']))
 
     if pattern == 'current':
         df['タイプ'] = '現状'
@@ -164,60 +178,74 @@ def insert_everything():
 
 def construct_urls(today):
     return [
+        {'pattern': 'outlook',
+         'url': 'http://www5.cao.go.jp/keizai3/%s/%s%swatcher/watcher5.csv' % tuple(today.split('-')),
+         'header_skip': 7, 'region': 'all'},
         {'pattern': 'current',
          'url': 'http://www5.cao.go.jp/keizai3/%s/%s%swatcher/watcher4.csv' % tuple(today.split('-')),
          'header_skip': 7, 'region': 'all'},
-        {'pattern': 'outlook', 'url': 'http://www5.cao.go.jp/keizai3/%s/%s%swatcher/watcher5.csv' % tuple(today.split('-')),
-         'header_skip': 7, 'region': 'all'},
-        {'pattern': 'current', 'url': 'http://www5.cao.go.jp/keizai3/%s/%s%swatcher/watcher6.csv' % tuple(today.split('-')),
-         'header_skip': 2, 'region': 'koshinetsu'},
         {'pattern': 'outlook',
          'url': 'http://www5.cao.go.jp/keizai3/%s/%s%swatcher/watcher7.csv' % tuple(today.split('-')),
          'header_skip': 2, 'region': 'koshinetsu'},
+        {'pattern': 'current',
+         'url': 'http://www5.cao.go.jp/keizai3/%s/%s%swatcher/watcher6.csv' % tuple(today.split('-')),
+         'header_skip': 2, 'region': 'koshinetsu'}
+    ]
+
+def construct_path():
+    return [
+        {'pattern': 'outlook', 'header_skip': 7, 'region': 'all'},
+        {'pattern': 'current', 'header_skip': 7, 'region': 'all'},
+        {'pattern': 'outlook', 'header_skip': 2, 'region': 'koshinetsu'},
+        {'pattern': 'current', 'header_skip': 2, 'region': 'koshinetsu'}
     ]
 
 
-def clean_data_frame(dfs):
-    append_df = dfs[0].append(dfs[1], sort=False)
-
+def clean_data_frame(df, pattern, region):
     # Remove unamed column
-    append_df = append_df.loc[:, ~append_df.columns.str.contains('^Unnamed')]
+    df = df.loc[:, ~df.columns.str.contains('^Unnamed')]
 
+    if region == 'koshinetsu':
+        df['reason'] = ''
 
-    append_df["comments"] = append_df["reason_future"].apply(lambda x: '' if pd.isnull(x) else x) + append_df[
-        "comments"].apply(lambda x: '' if pd.isnull(x) else x)
+    if pattern == 'outlook':
+        df['reason'] = ''
 
-    append_df['score'] = append_df['score_future'].apply(lambda x: 1.0 if pd.isnull(x) else x) * append_df[
-        'score_current'].apply(lambda x: 1.0 if pd.isnull(x) else x)
+    if pattern == 'outlook':
+        df["comments"] = ''
+        df["comments"] = df["reason_future"].apply(lambda x: '' if pd.isnull(x) else x) + df["comments"].apply(
+            lambda x: '' if pd.isnull(x) else x)
+
+    if pattern == 'outlook':
+        df['score'] = df['score_future'].apply(lambda x: 1.0 if pd.isnull(x) else x) * 1
+    else:
+        df['score'] = df['score_current'].apply(lambda x: 1.0 if pd.isnull(x) else x)
 
     # Has just combined reason_future and comments, so drop reason_future
-    append_df = append_df.drop(columns=['reason_future', 'score_future', 'score_current'])
+    if pattern == 'outlook':
+        df = df.drop(columns=['reason_future', 'score_future', ])
+    else:
+        df = df.drop(columns=['score_current'])
 
-    append_df['id'] = generateHash(
-        append_df[['dtype', 'category', 'reason', 'region', 'dt', 'comments',
-                   'industry', 'score']])
+    df['id'] = generateHash(
+        df[['dtype', 'category', 'reason', 'region', 'dt', 'comments',
+            'industry', 'score']])
 
-    append_df = append_df.set_index('id')
+    df = df.set_index('id')
 
-    return append_df
+    return df
 
 
-def construct_data_frame(urls, today_dt):
-    dfs = []
-    for e in urls:
-        logger.debug('doing %s' % e['url'])
-
-        d = retrieve_csv_file(e['url'])
-        if d:
-            df = create_dataframe(d, date=today_dt, header_skip=e['header_skip'], pattern=e['pattern'], region=e['region'])
-            dfs.append(df)
-        else:
-            logger.error('%s not available' % e['url'])
-
-    if len(dfs) < 1:
-        logger.error('df is empty')
-
-    return dfs
+def construct_data_frame_v2(e, today_dt):
+    d = retrieve_csv_file(e['url'])
+    if d:
+        logger.info('doing url: %s' % e['url'])
+        df = create_dataframe(d, date=today_dt, header_skip=e['header_skip'], pattern=e['pattern'], region=e['region'])
+        df = clean_data_frame(df, pattern=e['pattern'], region=e['region'])
+        return df
+    else:
+        logger.error('%s not available' % e['url'])
+    return None
 
 
 def to_yyyy_mm_dd(dt_str):
@@ -235,12 +263,14 @@ def insert_data(target_date, MANUAL_RUN=True):
         today_dt = datetime.strptime(datetime.today(), '%Y%m%d')
         today = datetime.strftime(today_dt, '%Y-%m-%d')
 
-    url_dict = construct_urls(today)
+    urls = construct_urls(today)
 
-    dfs = construct_data_frame(url_dict, today_dt)
+    dfs = []
+    for url in urls:
+        dfs.append(construct_data_frame_v2(url, today_dt))
 
     if len(dfs) >= 1:
-        append_df = clean_data_frame(dfs)
+        append_df = pd.concat(dfs)
         engine = create_engine(DATABASE_URL)
 
         if ON_HEROKU:
@@ -255,6 +285,9 @@ def insert_data(target_date, MANUAL_RUN=True):
             append_df.to_sql(os.environ['BUSINESS_WATCHER_BOT_TABLE_NAME'], engine, if_exists='append')
             logger.debug('saving at %s' % file_path % ('append', today))
 
+    # TODO:
+    #   Step1. Run the script on heroku by doing ```heroku run python fetcher.py```
+    #   Step2. Make sure dt_str is when the data is released
 
 if __name__ == '__main__':
 

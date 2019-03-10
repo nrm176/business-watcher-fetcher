@@ -294,7 +294,7 @@ def insert_data(target_date, MANUAL_RUN=True):
                 logger.error('error on insert: {0}'.format(e))
         else:
             append_df.to_csv(file_path % ('append', today), encoding='utf-8')
-            # append_df.to_sql(os.environ['BUSINESS_WATCHER_BOT_TABLE_NAME'], engine, if_exists='append')
+            append_df.to_sql(os.environ['BUSINESS_WATCHER_BOT_TABLE_NAME'], engine, if_exists='append')
             logger.debug('saving at %s' % file_path % ('append', today))
 
     # TODO:
@@ -313,7 +313,7 @@ if __name__ == '__main__':
 
     DATABASE_URL = os.environ["DATABASE_URL"]
 
-    target_dates = ['20100208', '20100308', '20100408', '20100513', '20100608', '20100708', '20100809', '20100908', '20101008', '20101109', '20101208', '20110112', '20110208', '20110308', '20110408', '20110512', '20110608', '20110708', '20110808', '20110908', '20111011', '20111109', '20111208']
+    target_dates = ['20190308']
     for target_date in target_dates:
         insert_data(target_date)
 

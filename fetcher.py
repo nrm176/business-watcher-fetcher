@@ -13,6 +13,8 @@ from logging import getLogger, StreamHandler, DEBUG
 import hashlib
 from pathlib import Path
 import psycopg2
+import random
+import string
 
 logger = getLogger(__name__)
 handler = StreamHandler()
@@ -142,6 +144,10 @@ def create_dataframe(data, date, header_skip, pattern, region):
 
     return df
 
+def randomString(stringLength=10):
+    """Generate a random string of fixed length """
+    letters = string.ascii_lowercase
+    return ''.join(random.choice(letters) for i in range(stringLength))
 
 def generateHash(df):
     hashes = []
@@ -151,6 +157,7 @@ def generateHash(df):
 
         # h = hashlib.new(t)
         r = ''.join(list(map(lambda t: str(t[0]), t)))
+        r += randomString(10)
         h = hashlib.md5(str.encode(r))
 
         hashes.append(h.hexdigest())

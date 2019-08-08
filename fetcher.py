@@ -320,7 +320,7 @@ if __name__ == '__main__':
 
     DATABASE_URL = os.environ["DATABASE_URL"]
 
-    target_dates = ['20190708']
+    target_dates = ['20190808']
     for target_date in target_dates:
         insert_data(target_date)
 

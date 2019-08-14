@@ -15,6 +15,8 @@ from pathlib import Path
 import psycopg2
 import random
 import string
+import argparse
+
 
 logger = getLogger(__name__)
 handler = StreamHandler()
@@ -289,7 +291,7 @@ def insert_data(target_date, MANUAL_RUN=True):
         dfs.append(construct_data_frame_v2(url, today_dt))
 
     if len(dfs) >= 1:
-        append_df = pd.concat(dfs)
+        append_df = pd.concat(dfs, sort=False)
         engine = create_engine(DATABASE_URL)
 
         if ON_HEROKU:
@@ -309,6 +311,10 @@ def insert_data(target_date, MANUAL_RUN=True):
     #   Step2. Make sure dt_str is when the data is released
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Arguments of report downloader')
+    parser.add_argument('--target_dates', help='Set a target date to download data')
+
+    args = parser.parse_args()
 
     ON_HEROKU = os.environ.get("ON_HEROKU", False)
 
@@ -320,7 +326,7 @@ if __name__ == '__main__':
 
     DATABASE_URL = os.environ["DATABASE_URL"]
 
-    target_dates = ['20190808']
+    target_dates = args.target_dates.split(',')
     for target_date in target_dates:
         insert_data(target_date)
 

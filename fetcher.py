@@ -191,16 +191,16 @@ def insert_everything():
 def construct_urls(today):
     return [
         {'pattern': 'outlook',
-         'url': 'http://www5.cao.go.jp/keizai3/%s/%s%swatcher/watcher5.csv' % tuple(today.split('-')),
+         'url': 'https://www5.cao.go.jp/keizai3/%s/%s%swatcher/watcher5.csv' % tuple(today.split('-')),
          'header_skip': 7, 'region': 'all'},
         {'pattern': 'current',
-         'url': 'http://www5.cao.go.jp/keizai3/%s/%s%swatcher/watcher4.csv' % tuple(today.split('-')),
+         'url': 'https://www5.cao.go.jp/keizai3/%s/%s%swatcher/watcher4.csv' % tuple(today.split('-')),
          'header_skip': 7, 'region': 'all'},
         {'pattern': 'outlook',
-         'url': 'http://www5.cao.go.jp/keizai3/%s/%s%swatcher/watcher7.csv' % tuple(today.split('-')),
+         'url': 'https://www5.cao.go.jp/keizai3/%s/%s%swatcher/watcher7.csv' % tuple(today.split('-')),
          'header_skip': 2, 'region': 'koshinetsu'},
         {'pattern': 'current',
-         'url': 'http://www5.cao.go.jp/keizai3/%s/%s%swatcher/watcher6.csv' % tuple(today.split('-')),
+         'url': 'https://www5.cao.go.jp/keizai3/%s/%s%swatcher/watcher6.csv' % tuple(today.split('-')),
          'header_skip': 2, 'region': 'koshinetsu'}
     ]
 

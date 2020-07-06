@@ -1,5 +1,4 @@
 import pandas as pd
-import re
 from datetime import datetime, timedelta
 import numpy as np
 import requests
@@ -11,8 +10,6 @@ from sqlalchemy import create_engine
 from dotenv import load_dotenv
 from logging import getLogger, StreamHandler, DEBUG
 import hashlib
-from pathlib import Path
-import psycopg2
 import random
 import string
 import argparse
@@ -326,10 +323,13 @@ if __name__ == '__main__':
 
     DATABASE_URL = os.environ["DATABASE_URL"]
 
+    if not args.target_dates:
+        logger.info('please set target date. i.e., --target_dates=20200408. --target_dates=20200101,20200202 if more than two')
+
     target_dates = args.target_dates.split(',')
     for target_date in target_dates:
         insert_data(target_date)
 
     # TODO:
-    #   Step1. Run the script on heroku by doing ```heroku run python fetcher.py```
+    #   Step1. Run the script on heroku by doing ```heroku run python fetcher.py --target_dates=yyyymmdd```
     #   Step2. Make sure dt_str is when the data is released

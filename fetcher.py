@@ -310,6 +310,7 @@ def insert_data(target_date, MANUAL_RUN=True):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Arguments of report downloader')
     parser.add_argument('--target_dates', help='Set a target date to download data')
+    parser.add_argument('--dry_run', help='set true if dry run')
 
     args = parser.parse_args()
 
@@ -328,7 +329,11 @@ if __name__ == '__main__':
 
     target_dates = args.target_dates.split(',')
     for target_date in target_dates:
-        insert_data(target_date)
+        if args.dry_run == '1':
+            logger.info('running as dry run...')
+        else:
+            logger.info('running as prd run...')
+            insert_data(target_date)
 
     # TODO:
     #   Step1. Run the script on heroku by doing ```heroku run python fetcher.py --target_dates=yyyymmdd```

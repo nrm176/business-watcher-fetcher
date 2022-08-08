@@ -312,6 +312,7 @@ if __name__ == '__main__':
         load_dotenv(dotenv_path)
 
     DATABASE_URL = os.environ["DATABASE_URL"]
+    DATABASE_URL = DATABASE_URL.replace('postgres', 'postgresql')
 
     if not args.target_dates:
         logger.info(

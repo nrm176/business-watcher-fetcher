@@ -231,6 +231,8 @@ def clean_data_frame(df, pattern, region):
         df[['dtype', 'category', 'reason', 'region', 'dt', 'comments',
             'industry', 'score']])
 
+    df = df.drop_duplicates(subset=['id'])
+
     df = df.set_index('id', verify_integrity=True)
 
     return df

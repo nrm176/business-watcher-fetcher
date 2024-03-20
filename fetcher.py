@@ -13,7 +13,10 @@ import hashlib
 import random
 import string
 import argparse
+import chardet
 from const import KOSHINETSU_CONVERTER_CURRENT_MAP, KOSHINETSU_CONVERTER_OUTLOOK_MAP, CONVERTER_MAP, RENAME_COLUMNS
+import logging
+
 
 logger = getLogger(__name__)
 handler = StreamHandler()
@@ -36,7 +39,9 @@ BASE_PATH = './historical_data/%s.%s.%s.csv'
 
 
 def create_dataframe(data, date, header_skip, pattern, region):
-    df = pd.read_csv(io.StringIO(data), header=header_skip, encoding="utf-8")
+    # check encoding using chardet
+
+    df = pd.read_csv(io.StringIO(data), header=header_skip)
 
     df = df.replace('\n', '', regex=True)
     df.rename(columns={'Unnamed: 1': '都道府県'}, inplace=True)
@@ -166,7 +171,16 @@ def retrieve_csv_file(url):
     res = requests.get(url)
     if res.status_code != 200:
         return None
-    data = res.content.decode('shift_jisx0213')
+
+    #check the encoding of res.content
+    encoding = chardet.detect(res.content)['encoding']
+
+    #
+
+    try:
+        data = res.content.decode(encoding)
+    except UnicodeDecodeError:
+        data = res.content.decode('shift_jisx0213', 'ignore')  # or 'replace'
     return data
 
 
@@ -265,6 +279,46 @@ def to_yyyy_mm_dd(dt_str):
     today = datetime.strftime(today_dt, '%Y-%m-%d')
     return today
 
+def create_file_name(url):
+    url_parts = url.split('/')
+
+    # Extract the date and the number
+    date = url_parts[-3:-1]
+    number = url_parts[-1].replace('watcher', '').replace('.csv', '')
+
+    # Join them with periods to form the filename
+    file_name = '.'.join(date + [number])
+    return f"{file_name}.csv"
+
+def download_csv(url):
+    res = requests.get(url)
+    if res.status_code != 200:
+        return None
+
+    # first, check the encoding of res.content
+    encoding = chardet.detect(res.content)['encoding']
+    logging.info(encoding) #utf-8-sig, cp932
+    try:
+        if encoding == 'utf-8-sig':
+            data = res.content.decode('utf-8-sig')
+        elif encoding == 'CP932':
+            data = res.content.decode('cp932')
+        else:
+            data = res.content.decode('shift_jisx0213')
+    except UnicodeDecodeError:
+        data = res.content.decode('shift_jisx0213', 'ignore')  # or 'replace'
+
+    # save data to csv
+    # create a file name from url and save it. the url format is as follows:
+    # https://www5.cao.go.jp/keizai3/2024/0308watcher/watcher5.csv
+    # in this case, the file name is 2024.0308watcher.watch5.csv
+    file_name = create_file_name(url)
+
+    with open(file_name, 'w', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        reader = csv.reader(data.splitlines())
+        for row in reader:
+            writer.writerow(row)
 
 def insert_data(target_date, MANUAL_RUN=True):
     if MANUAL_RUN:
@@ -285,6 +339,7 @@ def insert_data(target_date, MANUAL_RUN=True):
         append_df = pd.concat(dfs, sort=False)
         engine = create_engine(DATABASE_URL)
         try:
+            logger.info('saving at %s' % file_path % ('append', today))
             append_df.to_csv(file_path % ('append', today), encoding='utf-8')
             logger.debug('saving at %s' % file_path % ('append', today))
         except Exception as e:

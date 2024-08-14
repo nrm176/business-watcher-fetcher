@@ -361,7 +361,6 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     ON_HEROKU = os.environ.get("DYNO", False)
-
     file_path = '/tmp/%s_%s.csv' if ON_HEROKU else './%s_%s.csv'
 
     if not ON_HEROKU:

@@ -355,7 +355,7 @@ def insert_data(target_date, MANUAL_RUN=True):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Arguments of report downloader')
-    parser.add_argument('--target_dates', help='Set a target date to download data')
+    parser.add_argument('target_dates', help='Set a target date to download data')
     parser.add_argument('--dry_run', help='set true if dry run')
 
     args = parser.parse_args()

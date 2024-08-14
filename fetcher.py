@@ -367,6 +367,7 @@ if __name__ == '__main__':
         dotenv_path = join(dirname(__file__), '.env')
         load_dotenv(dotenv_path)
 
+
     DATABASE_URL = os.environ["DATABASE_URL"]
     DATABASE_URL = DATABASE_URL.replace('postgres', 'postgresql')
 

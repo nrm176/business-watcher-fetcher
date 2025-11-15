@@ -218,6 +218,8 @@ def construct_path():
 def clean_data_frame(df, pattern, region):
     # Remove unamed column
     df = df.loc[:, ~df.columns.str.contains('^Unnamed')]
+    # Work on a copy to avoid chained assignment warnings
+    df = df.copy()
 
     if region == 'koshinetsu':
         df['reason'] = ''
@@ -320,6 +322,36 @@ def download_csv(url):
         for row in reader:
             writer.writerow(row)
 
+def _enforce_supabase_ssl(db_url: str) -> str:
+    try:
+        from urllib.parse import urlparse, urlunparse, urlencode, parse_qsl
+        parsed = urlparse(db_url)
+        if not parsed.hostname or 'supabase.co' not in parsed.hostname:
+            return db_url
+        # merge existing query params and add sslmode=require if missing
+        q = dict(parse_qsl(parsed.query))
+        if q.get('sslmode') is None:
+            q['sslmode'] = 'require'
+        new_query = urlencode(q)
+        return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment))
+    except Exception:
+        return db_url
+
+
+def _can_resolve_host(db_url: str) -> bool:
+    try:
+        from urllib.parse import urlparse
+        import socket
+        host = urlparse(db_url).hostname
+        if not host:
+            return False
+        socket.gethostbyname(host)
+        return True
+    except Exception as e:
+        logger.error(f"DNS resolution failed for DB host: {e}")
+        return False
+
+
 def insert_data(target_date, MANUAL_RUN=True):
     if MANUAL_RUN:
         dt_str = target_date
@@ -337,7 +369,12 @@ def insert_data(target_date, MANUAL_RUN=True):
 
     if len(dfs) >= 1:
         append_df = pd.concat(dfs, sort=False)
-        engine = create_engine(DATABASE_URL)
+        # Ensure Supabase uses SSL and DNS resolves before connecting
+        safe_db_url = _enforce_supabase_ssl(DATABASE_URL)
+        if not _can_resolve_host(safe_db_url):
+            logger.error("Cannot resolve database host. Check your internet/DNS settings or the DATABASE_URL hostname.")
+            return
+        engine = create_engine(safe_db_url)
         try:
             logger.info('saving at %s' % file_path % ('append', today))
             append_df.to_csv(file_path % ('append', today), encoding='utf-8')
@@ -367,9 +404,29 @@ if __name__ == '__main__':
         dotenv_path = join(dirname(__file__), '.env')
         load_dotenv(dotenv_path)
 
+    # Normalize DATABASE_URL without corrupting username or driver
+    raw_url = os.environ.get("DATABASE_URL", "")
+    DATABASE_URL = raw_url
+    if raw_url.startswith('postgres://'):
+        DATABASE_URL = 'postgresql+psycopg2://' + raw_url[len('postgres://'):]
+    elif raw_url.startswith('postgresql://'):
+        DATABASE_URL = 'postgresql+psycopg2://' + raw_url[len('postgresql://'):]
+    elif raw_url.startswith('postgresql+'):  # keep provided driver
+        DATABASE_URL = raw_url
+    else:
+        # Fallback: if user accidentally provided just 'postgres', upgrade safely
+        DATABASE_URL = raw_url.replace('postgres://', 'postgresql+psycopg2://', 1)
 
-    DATABASE_URL = os.environ["DATABASE_URL"]
-    DATABASE_URL = DATABASE_URL.replace('postgres', 'postgresql')
+    # Enforce SSL for Supabase
+    DATABASE_URL = _enforce_supabase_ssl(DATABASE_URL)
+
+    # Lightweight log of target host for troubleshooting (no credentials)
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(DATABASE_URL)
+        logger.debug(f"DB host: {parsed.hostname}, port: {parsed.port}, db: {parsed.path.lstrip('/')}")
+    except Exception:
+        pass
 
     if not args.target_dates:
         logger.info(
@@ -384,5 +441,5 @@ if __name__ == '__main__':
             insert_data(target_date)
 
     # TODO:
-    #   Step1. Run the script on heroku by doing ```heroku run python fetcher.py --target_dates=yyyymmdd```
+    #   Step1. Run the script on heroku by doing ```heroku run python fetcher.py yyyymmdd```
     #   Step2. Make sure dt_str is when the data is released

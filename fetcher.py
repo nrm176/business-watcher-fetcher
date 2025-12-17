@@ -10,11 +10,11 @@ from sqlalchemy import create_engine
 from dotenv import load_dotenv
 from logging import getLogger, StreamHandler, DEBUG
 import hashlib
-import random
-import string
 import argparse
 import chardet
+from typing import List, Dict, Optional, Tuple
 from const import KOSHINETSU_CONVERTER_CURRENT_MAP, KOSHINETSU_CONVERTER_OUTLOOK_MAP, CONVERTER_MAP, RENAME_COLUMNS
+from validation import validate_dataframe
 import logging
 
 
@@ -25,20 +25,30 @@ logger.setLevel(DEBUG)
 logger.addHandler(handler)
 logger.propagate = False
 
+def _decode_csv_bytes(content: bytes) -> str:
+    """Decode CSV bytes to text using detected encoding with safe fallbacks."""
+    try:
+        encoding = chardet.detect(content).get('encoding') or 'utf-8'
+        logging.info(encoding)  # e.g., utf-8-sig, CP932
+        if encoding.lower() in ('utf-8-sig', 'utf_8_sig'):
+            return content.decode('utf-8-sig')
+        if encoding.upper() in ('CP932', 'SHIFT_JIS', 'SHIFT-JIS', 'SJIS'):
+            # CP932 is common for Japanese Windows CSVs
+            try:
+                return content.decode('cp932')
+            except UnicodeDecodeError:
+                return content.decode('shift_jisx0213', 'ignore')
+        # Default attempt with detected encoding
+        return content.decode(encoding, errors='ignore')
+    except Exception:
+        # Last-resort fallbacks
+        try:
+            return content.decode('utf-8')
+        except Exception:
+            return content.decode('shift_jisx0213', 'ignore')
 
-def to_csv(data, file=None):
-    if file:
-        with open(file, 'w', encoding='utf-8') as f:
-            writer = csv.writer(f)
-            reader = csv.reader(data.splitlines())
-            for row in reader:
-                writer.writerow(row)
 
-
-BASE_PATH = './historical_data/%s.%s.%s.csv'
-
-
-def create_dataframe(data, date, header_skip, pattern, region):
+def create_dataframe(data: str, date: datetime, header_skip: int, pattern: str, region: str) -> pd.DataFrame:
     # check encoding using chardet
 
     df = pd.read_csv(io.StringIO(data), header=header_skip)
@@ -136,59 +146,35 @@ def create_dataframe(data, date, header_skip, pattern, region):
     return df
 
 
-def randomString(stringLength=10):
-    """Generate a random string of fixed length """
-    letters = string.ascii_lowercase
-    return ''.join(random.choice(letters) for i in range(stringLength))
-
-
-def generate_hash(df):
+def generate_hash(df: pd.DataFrame) -> List[str]:
     hashes = []
     for idx, row in df.iterrows():
         xs = list(zip(row, row.index))
         t = tuple(tuple(x) for x in xs)
 
-        # h = hashlib.new(t)
         r = ''.join(list(map(lambda t: str(t[0]), t)))
-        # r += randomString(10)
         h = hashlib.md5(str.encode(r))
 
         hashes.append(h.hexdigest())
     return hashes
 
 
-def pattern_counter(series):
-    d = {}
+def pattern_counter(series: pd.Series) -> Dict:
+    d: Dict = {}
     for e in series:
-        if d.get(e) is None:
-            d[e] = 1
-        else:
-            d[e] = d[e] + 1
+        d[e] = d.get(e, 0) + 1
     return d
 
 
-def retrieve_csv_file(url):
+def retrieve_csv_file(url: str) -> Optional[str]:
     res = requests.get(url)
     if res.status_code != 200:
         return None
 
-    #check the encoding of res.content
-    encoding = chardet.detect(res.content)['encoding']
-
-    #
-
-    try:
-        data = res.content.decode(encoding)
-    except UnicodeDecodeError:
-        data = res.content.decode('shift_jisx0213', 'ignore')  # or 'replace'
-    return data
+    return _decode_csv_bytes(res.content)
 
 
-def insert_everything():
-    pass
-
-
-def construct_urls(today):
+def construct_urls(today: str) -> List[Dict[str, str]]:
     key = tuple(today.split('-'))
     return [
         {'pattern': 'outlook',
@@ -206,7 +192,7 @@ def construct_urls(today):
     ]
 
 
-def construct_path():
+def construct_path() -> List[Dict[str, str]]:
     return [
         {'pattern': 'outlook', 'header_skip': 7, 'region': 'all'},
         {'pattern': 'current', 'header_skip': 7, 'region': 'all'},
@@ -215,7 +201,7 @@ def construct_path():
     ]
 
 
-def clean_data_frame(df, pattern, region):
+def clean_data_frame(df: pd.DataFrame, pattern: str, region: str) -> pd.DataFrame:
     # Remove unamed column
     df = df.loc[:, ~df.columns.str.contains('^Unnamed')]
     # Work on a copy to avoid chained assignment warnings
@@ -254,7 +240,7 @@ def clean_data_frame(df, pattern, region):
     return df
 
 
-def construct_data_frame_v2(e, today_dt):
+def construct_data_frame_v2(e: Dict[str, str], today_dt: datetime) -> Optional[pd.DataFrame]:
     d = retrieve_csv_file(e['url'])
     if d:
         logger.info('doing url: %s' % e['url'])
@@ -266,22 +252,7 @@ def construct_data_frame_v2(e, today_dt):
         logger.error('%s not available' % e['url'])
     return None
 
-
-def construct_data_frame_v3(path, yyyymmdddate, today_dt):
-    logger.info('doing url: %s' % path)
-    df = create_dataframe(path, yyyymmdddate=yyyymmdddate, date=today_dt, header_skip=path['header_skip'],
-                          pattern=path['pattern'], region=path['region'])
-    if df is not None:
-        df = clean_data_frame(df, pattern=path['pattern'], region=path['region'])
-        return df
-
-
-def to_yyyy_mm_dd(dt_str):
-    today_dt = datetime.strptime(dt_str, '%Y%m%d')
-    today = datetime.strftime(today_dt, '%Y-%m-%d')
-    return today
-
-def create_file_name(url):
+def create_file_name(url: str) -> str:
     url_parts = url.split('/')
 
     # Extract the date and the number
@@ -292,23 +263,12 @@ def create_file_name(url):
     file_name = '.'.join(date + [number])
     return f"{file_name}.csv"
 
-def download_csv(url):
+def download_csv(url: str) -> Optional[str]:
     res = requests.get(url)
     if res.status_code != 200:
         return None
 
-    # first, check the encoding of res.content
-    encoding = chardet.detect(res.content)['encoding']
-    logging.info(encoding) #utf-8-sig, cp932
-    try:
-        if encoding == 'utf-8-sig':
-            data = res.content.decode('utf-8-sig')
-        elif encoding == 'CP932':
-            data = res.content.decode('cp932')
-        else:
-            data = res.content.decode('shift_jisx0213')
-    except UnicodeDecodeError:
-        data = res.content.decode('shift_jisx0213', 'ignore')  # or 'replace'
+    data = _decode_csv_bytes(res.content)
 
     # save data to csv
     # create a file name from url and save it. the url format is as follows:
@@ -321,6 +281,7 @@ def download_csv(url):
         reader = csv.reader(data.splitlines())
         for row in reader:
             writer.writerow(row)
+    return file_name
 
 def _enforce_supabase_ssl(db_url: str) -> str:
     try:
@@ -352,14 +313,15 @@ def _can_resolve_host(db_url: str) -> bool:
         return False
 
 
-def insert_data(target_date, MANUAL_RUN=True):
+def insert_data(target_date: str, MANUAL_RUN: bool = True) -> None:
     if MANUAL_RUN:
         dt_str = target_date
         today_dt = datetime.strptime(dt_str, '%Y%m%d')
         today = datetime.strftime(today_dt, '%Y-%m-%d')
     else:
-        today_dt = datetime.strptime(datetime.today(), '%Y%m%d')
-        today = datetime.strftime(today_dt, '%Y-%m-%d')
+        # Use current date safely without strptime misuse
+        today_dt = datetime.today()
+        today = today_dt.strftime('%Y-%m-%d')
 
     urls = construct_urls(today)
 
@@ -369,6 +331,15 @@ def insert_data(target_date, MANUAL_RUN=True):
 
     if len(dfs) >= 1:
         append_df = pd.concat(dfs, sort=False)
+        # Validate with Pydantic models; split into valid and invalid sets
+        try:
+            valid_df, invalid_df, errors = validate_dataframe(append_df)
+            if invalid_df is not None and not invalid_df.empty:
+                logger.warning(f"Found {len(invalid_df)} invalid rows; they will be skipped from DB insert.")
+        except Exception as e:
+            logger.error(f"Validation failed before insert: {e}")
+            # If validation fails catastrophically, bail out to avoid corrupt data
+            return
         # Ensure Supabase uses SSL and DNS resolves before connecting
         safe_db_url = _enforce_supabase_ssl(DATABASE_URL)
         if not _can_resolve_host(safe_db_url):
@@ -378,14 +349,23 @@ def insert_data(target_date, MANUAL_RUN=True):
         try:
             logger.info('saving at %s' % file_path % ('append', today))
             append_df.to_csv(file_path % ('append', today), encoding='utf-8')
+            # Also persist invalid rows if any for audit
+            if invalid_df is not None and not invalid_df.empty:
+                invalid_path = file_path % ('invalid', today)
+                invalid_df.to_csv(invalid_path, encoding='utf-8')
+                logger.info(f"invalid rows saved at {invalid_path}")
             logger.debug('saving at %s' % file_path % ('append', today))
         except Exception as e:
             logger.error('error on creating a csv file: {0}'.format(e))
 
         try:
             with engine.begin() as connection:
-                append_df.to_sql(os.environ['BUSINESS_WATCHER_BOT_TABLE_NAME'], con=connection, if_exists='append')
-                logger.debug('records as of {0} have been saved to postgres'.format(today))
+                # Only insert validated rows
+                if valid_df is not None and not valid_df.empty:
+                    valid_df.to_sql(os.environ['BUSINESS_WATCHER_BOT_TABLE_NAME'], con=connection, if_exists='append')
+                    logger.debug('validated records as of {0} have been saved to postgres'.format(today))
+                else:
+                    logger.warning('No valid rows to insert after validation.')
         except Exception as e:
             logger.error('error on insert: {0}'.format(e))
 
@@ -397,12 +377,22 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
-    ON_HEROKU = os.environ.get("DYNO", False)
-    file_path = '/tmp/%s_%s.csv' if ON_HEROKU else './%s_%s.csv'
-
-    if not ON_HEROKU:
+    # Load environment from .env if present (platform-agnostic)
+    try:
+        # Attempts to load .env from project root; safe if file is missing
         dotenv_path = join(dirname(__file__), '.env')
         load_dotenv(dotenv_path)
+    except Exception:
+        pass
+
+    # Platform-agnostic output directory
+    OUTPUT_DIR = os.environ.get("OUTPUT_DIR", "./")
+    try:
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
+    except Exception:
+        logger.warning(f"Could not create output directory '{OUTPUT_DIR}'. Falling back to current directory.")
+        OUTPUT_DIR = "./"
+    file_path = os.path.join(OUTPUT_DIR, '%s_%s.csv')
 
     # Normalize DATABASE_URL without corrupting username or driver
     raw_url = os.environ.get("DATABASE_URL", "")
@@ -440,6 +430,4 @@ if __name__ == '__main__':
             logger.info('running as prd run...')
             insert_data(target_date)
 
-    # TODO:
-    #   Step1. Run the script on heroku by doing ```heroku run python fetcher.py yyyymmdd```
-    #   Step2. Make sure dt_str is when the data is released
+    # Note: Ensure the target date corresponds to an official release date for best results.

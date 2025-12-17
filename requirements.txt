@@ -6,3 +6,4 @@ psycopg2
 psycopg2-binary
 python-dotenv
 chardet
+pydantic>=2.0,<3.0

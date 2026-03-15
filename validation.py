@@ -75,6 +75,15 @@ def validate_dataframe(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, Li
     # Ensure 'id' is a column (not only index)
     work_df = df.reset_index()
 
+    # Option B: Pre-clean DataFrame optional text fields so Pydantic sees None instead of NaN/blank strings
+    optional_text_cols = ['industry', 'industry_detail', 'job_title', 'pref', 'comments', 'reason']
+    for col in optional_text_cols:
+        if col in work_df.columns:
+            # Convert NaN to None
+            work_df[col] = work_df[col].where(~work_df[col].isna(), None)
+            # Normalize empty strings to None as well
+            work_df[col] = work_df[col].apply(lambda x: None if isinstance(x, str) and x.strip() == '' else x)
+
     val_rows = []
     bad_rows = []
     errors: List[Dict[str, Any]] = []

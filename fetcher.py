@@ -6,13 +6,16 @@ import io
 import csv
 from os.path import join, dirname
 import os
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, Table, MetaData
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from dotenv import load_dotenv
 from logging import getLogger, StreamHandler, DEBUG
 import hashlib
 import argparse
 import chardet
 from typing import List, Dict, Optional, Tuple
+import json
+from collections import Counter
 from const import KOSHINETSU_CONVERTER_CURRENT_MAP, KOSHINETSU_CONVERTER_OUTLOOK_MAP, CONVERTER_MAP, RENAME_COLUMNS
 from validation import validate_dataframe
 import logging
@@ -189,7 +192,7 @@ def construct_urls(today: str) -> List[Dict[str, str]]:
         {'pattern': 'current',
          'url': 'https://www5.cao.go.jp/keizai3/%s/%s%swatcher/watcher6.csv' % key,
          'header_skip': 2, 'region': 'koshinetsu'}
-    ]
+    ] # type: ignore
 
 
 def construct_path() -> List[Dict[str, str]]:
@@ -198,12 +201,12 @@ def construct_path() -> List[Dict[str, str]]:
         {'pattern': 'current', 'header_skip': 7, 'region': 'all'},
         {'pattern': 'outlook', 'header_skip': 2, 'region': 'koshinetsu'},
         {'pattern': 'current', 'header_skip': 2, 'region': 'koshinetsu'}
-    ]
+    ] # type: ignore
 
 
 def clean_data_frame(df: pd.DataFrame, pattern: str, region: str) -> pd.DataFrame:
     # Remove unamed column
-    df = df.loc[:, ~df.columns.str.contains('^Unnamed')]
+    df = df.loc[:, ~df.columns.str.contains('^Unnamed')] # type: ignore
     # Work on a copy to avoid chained assignment warnings
     df = df.copy()
 
@@ -231,7 +234,7 @@ def clean_data_frame(df: pd.DataFrame, pattern: str, region: str) -> pd.DataFram
 
     df['id'] = generate_hash(
         df[['dtype', 'category', 'reason', 'region', 'dt', 'comments',
-            'industry', 'score']])
+            'industry', 'score']]) # type: ignore
 
     df = df.drop_duplicates(subset=['id'])
 
@@ -244,7 +247,7 @@ def construct_data_frame_v2(e: Dict[str, str], today_dt: datetime) -> Optional[p
     d = retrieve_csv_file(e['url'])
     if d:
         logger.info('doing url: %s' % e['url'])
-        df = create_dataframe(d, date=today_dt, header_skip=e['header_skip'], pattern=e['pattern'], region=e['region'])
+        df = create_dataframe(d, date=today_dt, header_skip=e['header_skip'], pattern=e['pattern'], region=e['region']) # type: ignore
         if df is not None:
             df = clean_data_frame(df, pattern=e['pattern'], region=e['region'])
             return df
@@ -313,7 +316,42 @@ def _can_resolve_host(db_url: str) -> bool:
         return False
 
 
-def insert_data(target_date: str, MANUAL_RUN: bool = True) -> None:
+def _upsert_valid_df(engine, df: pd.DataFrame, table_name: str, mode: str = 'nothing') -> int:
+    """Upsert `df` into Postgres using ON CONFLICT on primary key `id`.
+
+    Parameters
+    - engine: SQLAlchemy engine
+    - df: validated DataFrame with index 'id'
+    - table_name: destination table
+    - mode: 'nothing' → DO NOTHING (deduplicate only),
+            'update' → DO UPDATE (overwrite non-PK columns)
+
+    Returns the number of rows attempted (not necessarily affected rows).
+    """
+    if df is None or df.empty:
+        return 0
+    # Ensure 'id' is present as a column for insertion
+    records = df.reset_index().to_dict(orient='records')
+    metadata = MetaData()
+    with engine.begin() as conn:
+        tbl = Table(table_name, metadata, autoload_with=conn)
+        total = 0
+        chunk_size = 1000
+        for i in range(0, len(records), chunk_size):
+            chunk = records[i:i + chunk_size]
+            stmt = pg_insert(tbl).values(chunk)
+            if mode == 'update':
+                update_cols = {c.name: getattr(stmt.excluded, c.name)
+                               for c in tbl.columns if c.name != 'id'}
+                stmt = stmt.on_conflict_do_update(index_elements=['id'], set_=update_cols)
+            else:
+                stmt = stmt.on_conflict_do_nothing(index_elements=['id'])
+            conn.execute(stmt)
+            total += len(chunk)
+        return total
+
+
+def insert_data(target_date: str, dry_run: bool = False, MANUAL_RUN: bool = True) -> None:
     if MANUAL_RUN:
         dt_str = target_date
         today_dt = datetime.strptime(dt_str, '%Y%m%d')
@@ -334,18 +372,20 @@ def insert_data(target_date: str, MANUAL_RUN: bool = True) -> None:
         # Validate with Pydantic models; split into valid and invalid sets
         try:
             valid_df, invalid_df, errors = validate_dataframe(append_df)
+            # Summarize validation outcome
+            valid_count = len(valid_df) if valid_df is not None else 0
+            invalid_count = len(invalid_df) if invalid_df is not None else 0
+            error_count = len(errors) if errors is not None else 0
+            logger.info(
+                f"Validation summary — valid: {valid_count}, invalid: {invalid_count}, errors: {error_count}"
+            )
             if invalid_df is not None and not invalid_df.empty:
-                logger.warning(f"Found {len(invalid_df)} invalid rows; they will be skipped from DB insert.")
+                logger.warning(f"Found {invalid_count} invalid rows; they will be skipped from DB insert.")
         except Exception as e:
             logger.error(f"Validation failed before insert: {e}")
             # If validation fails catastrophically, bail out to avoid corrupt data
             return
-        # Ensure Supabase uses SSL and DNS resolves before connecting
-        safe_db_url = _enforce_supabase_ssl(DATABASE_URL)
-        if not _can_resolve_host(safe_db_url):
-            logger.error("Cannot resolve database host. Check your internet/DNS settings or the DATABASE_URL hostname.")
-            return
-        engine = create_engine(safe_db_url)
+        
         try:
             logger.info('saving at %s' % file_path % ('append', today))
             append_df.to_csv(file_path % ('append', today), encoding='utf-8')
@@ -354,26 +394,64 @@ def insert_data(target_date: str, MANUAL_RUN: bool = True) -> None:
                 invalid_path = file_path % ('invalid', today)
                 invalid_df.to_csv(invalid_path, encoding='utf-8')
                 logger.info(f"invalid rows saved at {invalid_path}")
+            # Persist validation errors as structured logs (CSV and JSON)
+            try:
+                if errors is not None and len(errors) > 0:
+                    errors_path_csv = file_path % ('errors', today)
+                    # Reuse same template but ensure extension for JSON separately
+                    # Convert errors (list[dict]) to DataFrame for CSV
+                    err_df = pd.DataFrame(errors)
+                    err_df.to_csv(errors_path_csv, index=False, encoding='utf-8')
+                    errors_path_json = os.path.splitext(errors_path_csv)[0] + '.json'
+                    with open(errors_path_json, 'w', encoding='utf-8') as jf:
+                        json.dump(errors, jf, ensure_ascii=False, indent=2)
+                    # Log a short summary of most common error messages
+                    msgs = [e.get('errors', '') for e in errors]
+                    top = Counter(msgs).most_common(5)
+                    logger.info(f"Saved validation error logs: {errors_path_csv} and {errors_path_json}")
+                    logger.info("Top validation errors: " + "; ".join([f"{m} x{c}" for m, c in top]))
+            except Exception as le:
+                logger.warning(f"Failed to save error logs: {le}")
             logger.debug('saving at %s' % file_path % ('append', today))
         except Exception as e:
             logger.error('error on creating a csv file: {0}'.format(e))
 
+        # Handle DB upsert unless dry run
+        if dry_run:
+            # Reuse previously computed counts if available; default to 0 when not set
+            try:
+                v_cnt, iv_cnt, err_cnt = valid_count, invalid_count, error_count
+            except NameError:
+                v_cnt = len(valid_df) if valid_df is not None else 0
+                iv_cnt = len(invalid_df) if invalid_df is not None else 0
+                err_cnt = len(errors) if errors is not None else 0
+            logger.info(
+                f"Dry run: skipping database upsert. CSV outputs and error logs have been written. "
+                f"Counts — valid: {v_cnt}, invalid: {iv_cnt}, errors logged: {err_cnt}"
+            )
+            return
         try:
-            with engine.begin() as connection:
-                # Only insert validated rows
-                if valid_df is not None and not valid_df.empty:
-                    valid_df.to_sql(os.environ['BUSINESS_WATCHER_BOT_TABLE_NAME'], con=connection, if_exists='append')
-                    logger.debug('validated records as of {0} have been saved to postgres'.format(today))
-                else:
-                    logger.warning('No valid rows to insert after validation.')
+            # Ensure Supabase uses SSL and DNS resolves before connecting
+            safe_db_url = _enforce_supabase_ssl(DATABASE_URL)
+            if not _can_resolve_host(safe_db_url):
+                logger.error("Cannot resolve database host. Check your internet/DNS settings or the DATABASE_URL hostname.")
+                return
+            engine = create_engine(safe_db_url)
+            # Only insert validated rows
+            if valid_df is not None and not valid_df.empty:
+                upsert_mode = os.environ.get('UPSERT_MODE', 'nothing').lower()
+                attempted = _upsert_valid_df(engine, valid_df, os.environ['BUSINESS_WATCHER_BOT_TABLE_NAME'], upsert_mode)
+                logger.debug(f'validated records as of {today} attempted to upsert: {attempted} (mode={upsert_mode})')
+            else:
+                logger.warning('No valid rows to insert after validation.')
         except Exception as e:
-            logger.error('error on insert: {0}'.format(e))
+            logger.error('error on insert (upsert): {0}'.format(e))
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Arguments of report downloader')
     parser.add_argument('target_dates', help='Set a target date to download data')
-    parser.add_argument('--dry_run', help='set true if dry run')
+    parser.add_argument('--dry_run', help='set true if dry run (accepts 1/true/yes)')
 
     args = parser.parse_args()
 
@@ -424,10 +502,14 @@ if __name__ == '__main__':
 
     target_dates = args.target_dates.split(',')
     for target_date in target_dates:
-        if args.dry_run == '1':
+        is_dry = False
+        if args.dry_run is not None:
+            val = str(args.dry_run).strip().lower()
+            is_dry = val in ('1', 'true', 'yes', 'y')
+        if is_dry:
             logger.info('running as dry run...')
         else:
             logger.info('running as prd run...')
-            insert_data(target_date)
+        insert_data(target_date, dry_run=is_dry)
 
     # Note: Ensure the target date corresponds to an official release date for best results.

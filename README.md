@@ -11,6 +11,7 @@ A small utility that downloads the Japanese Economy Watchers Survey CSVs, cleans
 - Outputs CSVs to a configurable directory:
   - `append_YYYY-MM-DD.csv` — full combined dataset for the run.
   - `invalid_YYYY-MM-DD.csv` — rows that failed validation (for auditing).
+  - `errors_YYYY-MM-DD.csv` / `errors_YYYY-MM-DD.json` — structured validation error logs per invalid row.
 - Bulk insert of validated rows into Postgres using SQLAlchemy.
 
 ### Requirements
@@ -45,7 +46,7 @@ Multiple dates (comma-separated):
 python fetcher.py 20250111,20250208
 ```
 
-Dry run (skip DB insert but still process and write CSV outputs):
+Dry run (runs full processing and validation, writes outputs and error logs, but skips DB insert):
 
 ```
 python fetcher.py 20250111 --dry_run=1
@@ -54,6 +55,7 @@ python fetcher.py 20250111 --dry_run=1
 Outputs are written to `OUTPUT_DIR` (or current directory by default):
 - `append_YYYY-MM-DD.csv`
 - `invalid_YYYY-MM-DD.csv` (only if there are invalid rows)
+- `errors_YYYY-MM-DD.csv` and `errors_YYYY-MM-DD.json` (only if there are validation errors)
 
 ### Optional: Download historical raw CSVs
 `download_csv.py` can download older survey CSV files into `./historical_data/`.
@@ -70,6 +72,7 @@ python download_csv.py
   - `DATABASE_URL` is a valid Postgres URL; the script normalizes common forms to SQLAlchemy’s `postgresql+psycopg2://...`.
   - For Supabase, `sslmode=require` is appended automatically.
 - If validation rejects rows, check `invalid_YYYY-MM-DD.csv` to review errors and the affected rows.
+  - Detailed error messages are in `errors_YYYY-MM-DD.csv` and `errors_YYYY-MM-DD.json`.
 
 ### Development
 Install dependencies and run:

@@ -1,4 +1,5 @@
 import requests
+import os
 from datetime import datetime
 
 from const import HISTORICAL_DATA_BASE_PATH, REQUEST_TIMEOUT_SEC
@@ -12,7 +13,8 @@ def convert_date(target_date):
 
 def retrieve_csv_file(item, dt):
     print('getting %s' % item['url'])
-    filename = '%s%s.%s.%s.csv' % (BASE_PATH, dt, item['pattern'], item['region'])
+    os.makedirs(BASE_PATH, exist_ok=True)
+    filename = os.path.join(BASE_PATH, '%s.%s.%s.csv' % (dt, item['pattern'], item['region']))
     try:
         res = requests.get(item['url'], timeout=REQUEST_TIMEOUT_SEC)
     except requests.RequestException as exc:

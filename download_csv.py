@@ -1,18 +1,24 @@
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime
 
-BASE_PATH = './historical_data/'
+from const import HISTORICAL_DATA_BASE_PATH, REQUEST_TIMEOUT_SEC
+from fetcher_shared import build_source_urls, SOURCE_CONFIG
+
+BASE_PATH = HISTORICAL_DATA_BASE_PATH
 
 def convert_date(target_date):
-    dt_str = target_date
-    today_dt = datetime.strptime(dt_str, '%Y%m%d')
-    today = datetime.strftime(today_dt, '%Y-%m-%d')
-    return today
+    today_dt = datetime.strptime(target_date, '%Y%m%d')
+    return datetime.strftime(today_dt, '%Y-%m-%d')
 
 def retrieve_csv_file(item, dt):
     print('getting %s' % item['url'])
     filename = '%s%s.%s.%s.csv' % (BASE_PATH, dt, item['pattern'], item['region'])
-    res = requests.get(item['url'])
+    try:
+        res = requests.get(item['url'], timeout=REQUEST_TIMEOUT_SEC)
+    except requests.RequestException as exc:
+        print('request failed for %s: %s' % (item['url'], exc))
+        return None
+
     if res.status_code != 200:
         return None
     else:
@@ -24,20 +30,7 @@ def retrieve_csv_file(item, dt):
 
 
 def construct_urls(today):
-    return [
-        {'pattern': 'outlook',
-         'url': 'http://www5.cao.go.jp/keizai3/%s/%s%swatcher/watcher5.csv' % tuple(today.split('-')),
-         'header_skip': 7, 'region': 'all'},
-        {'pattern': 'current',
-         'url': 'http://www5.cao.go.jp/keizai3/%s/%s%swatcher/watcher4.csv' % tuple(today.split('-')),
-         'header_skip': 7, 'region': 'all'},
-        {'pattern': 'outlook',
-         'url': 'http://www5.cao.go.jp/keizai3/%s/%s%swatcher/watcher7.csv' % tuple(today.split('-')),
-         'header_skip': 2, 'region': 'koshinetsu'},
-        {'pattern': 'current',
-         'url': 'http://www5.cao.go.jp/keizai3/%s/%s%swatcher/watcher6.csv' % tuple(today.split('-')),
-         'header_skip': 2, 'region': 'koshinetsu'}
-    ]
+    return build_source_urls(today, SOURCE_CONFIG)
 
 
 if __name__ == '__main__':

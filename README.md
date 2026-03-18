@@ -82,6 +82,20 @@ pip install -r requirements.txt
 python fetcher.py 20250111 --dry_run=1
 ```
 
+Run unit tests:
+
+```bash
+python -m unittest -v
+```
+
+Optional database integration tests (auto-skip if env vars are missing):
+
+```bash
+DATABASE_URL='postgresql://user:pass@host:5432/dbname' \
+BUSINESS_WATCHER_BOT_TABLE_NAME='your_table' \
+python -m unittest -v test_integration_db.py
+```
+
 ### Platform notes
 - The tool is platform-agnostic. Provide configuration via `.env` or environment variables.
 - You can control output location using `OUTPUT_DIR`.

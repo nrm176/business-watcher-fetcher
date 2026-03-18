@@ -1,515 +1,233 @@
-import pandas as pd
-from datetime import datetime, timedelta
-import numpy as np
-import requests
-import io
-import csv
-from os.path import join, dirname
-import os
-from sqlalchemy import create_engine, Table, MetaData
-from sqlalchemy.dialects.postgresql import insert as pg_insert
-from dotenv import load_dotenv
-from logging import getLogger, StreamHandler, DEBUG
-import hashlib
-import argparse
-import chardet
-from typing import List, Dict, Optional, Tuple
-import json
-from collections import Counter
-from const import KOSHINETSU_CONVERTER_CURRENT_MAP, KOSHINETSU_CONVERTER_OUTLOOK_MAP, CONVERTER_MAP, RENAME_COLUMNS
-from validation import validate_dataframe
-import logging
+# pyright: reportMissingImports=false, reportMissingModuleSource=false
+"""Thin CLI orchestrator for the BusinessWatcherBot pipeline.
 
+Stages are implemented in pipeline.py:
+  1. Fetch    - download raw CSV text from Cabinet Office URLs
+  2. Transform - normalise and clean each source into a DataFrame
+  3. Validate  - Pydantic schema validation (via validation.py)
+  4. Persist   - write CSV snapshots and optionally upsert to Postgres
+
+Usage:
+  python fetcher.py 20260309
+  python fetcher.py 20260309 --dry_run=1
+  python fetcher.py 20260101,20260208
+"""
+
+import argparse
+import csv
+import os
+from datetime import datetime
+from logging import DEBUG, StreamHandler, getLogger
+from os.path import dirname, join
+from typing import Dict, List, Optional
+from urllib.parse import urlparse
+
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
+
+from fetcher_shared import (
+    SOURCE_CONFIG,
+    build_source_urls,
+    can_resolve_host,
+    decode_csv_bytes,
+    enforce_supabase_ssl,
+    http_get,
+    normalize_database_url,
+    parse_truthy,
+)
+from pipeline import assemble_dataframes, fetch_sources, persist_csv, persist_db
+from validation import validate_dataframe
+
+# Alias kept for backwards compatibility with tests and external callers
+CSV_SOURCE_CONFIG = SOURCE_CONFIG
 
 logger = getLogger(__name__)
-handler = StreamHandler()
-handler.setLevel(DEBUG)
+if not logger.handlers:
+    handler = StreamHandler()
+    handler.setLevel(DEBUG)
+    logger.addHandler(handler)
 logger.setLevel(DEBUG)
-logger.addHandler(handler)
 logger.propagate = False
 
+
+# ---------------------------------------------------------------------------
+# Thin wrappers - preserve public names used by test_debug.py and callers
+# ---------------------------------------------------------------------------
+
+def _truthy(value: Optional[str]) -> bool:
+    return parse_truthy(value)
+
+
 def _decode_csv_bytes(content: bytes) -> str:
-    """Decode CSV bytes to text using detected encoding with safe fallbacks."""
-    try:
-        encoding = chardet.detect(content).get('encoding') or 'utf-8'
-        logging.info(encoding)  # e.g., utf-8-sig, CP932
-        if encoding.lower() in ('utf-8-sig', 'utf_8_sig'):
-            return content.decode('utf-8-sig')
-        if encoding.upper() in ('CP932', 'SHIFT_JIS', 'SHIFT-JIS', 'SJIS'):
-            # CP932 is common for Japanese Windows CSVs
-            try:
-                return content.decode('cp932')
-            except UnicodeDecodeError:
-                return content.decode('shift_jisx0213', 'ignore')
-        # Default attempt with detected encoding
-        return content.decode(encoding, errors='ignore')
-    except Exception:
-        # Last-resort fallbacks
-        try:
-            return content.decode('utf-8')
-        except Exception:
-            return content.decode('shift_jisx0213', 'ignore')
+    return decode_csv_bytes(content, logger)
 
 
-def create_dataframe(data: str, date: datetime, header_skip: int, pattern: str, region: str) -> pd.DataFrame:
-    # check encoding using chardet
-
-    df = pd.read_csv(io.StringIO(data), header=header_skip)
-
-    df = df.replace('\n', '', regex=True)
-    df.rename(columns={'Unnamed: 1': '都道府県'}, inplace=True)
-    # remove new line and \u3000
-    df['分野'] = list(map(lambda x: x.replace('\n', '').replace('\u3000', '') if type(x) == str else x, df['分野']))
-
-    # fill nan if x[0] is digit or x is a unwanted word
-    df['分野'] = list(map(lambda x: np.nan if type(x) == str and
-                                            (x[0].isdigit() or x == '分野') else x, df['分野']))
-
-    # 下記のwordが入っている行はnanとする
-    if pattern == 'current':
-        words = ['景気の現状判断', '判断の理由', '追加説明及び具体的状況の説明', '業種・職種']
-    else:
-        words = ['景気の先行き判断', '景気の先行きに対する判断理由', '業種・職種']
-
-    for word in words:
-        df[word] = list(map(lambda x: np.nan if type(x) == str and
-                                                x == word else x, df[word]))
-
-    # fill nan with previous value
-    df['分野'] = df['分野'].fillna(method='ffill')
-
-    # add new columns
-    df.loc[:, '地域'] = np.nan
-    df.loc[:, '業種'] = np.nan
-    df.loc[:, '業種詳細'] = np.nan
-    df.loc[:, '職種'] = np.nan
-    # もともとの分野を括弧を元に分割する。分野と地域に分かれる。
-    if region == 'all':
-        df['地域'] = list(map(lambda x: x.split('(')[1].replace(')', '') if type(x) == str else x, df['分野']))
-    else:
-        df['地域'] = '甲信越'
-
-    df['分野'] = list(map(lambda x: x.split('(')[0] if type(x) == str and '(' in x else x, df['分野']))
-
-    df['業種'] = list(map(lambda x: x.split('（')[0] if type(x) == str and '（' in x else x, df['業種・職種']))
-    df['職種'] = list(map(lambda x: x.split('（')[1].replace('）', '') if type(x) == str and '（' in x else x, df['業種・職種']))
-
-    # 説明欄にある特殊文字は不要
-    def splitter(x, delimiter=None, remover=None):
-        if delimiter and remover:
-            if len(x.split(delimiter)) > 1:
-                return x.split(delimiter)[1].replace(remover, '')
-            return np.nan
-
-    df['業種詳細'] = list(map(lambda x: splitter(x, '［', '］') if type(x) == str else x, df['業種']))
-    df['業種'] = list(map(lambda x: x.split('［')[0] if type(x) == str and '［' in x else x, df['業種']))
-
-    if pattern == 'current':
-        df['追加説明及び具体的状況の説明'] = list(map(lambda x: x.replace('・', '') if type(x) == str else x, df['追加説明及び具体的状況の説明']))
-        df = df[df['判断の理由'] != '＊']
-        df = df[df['判断の理由'] != '−']
-    else:
-        df['景気の先行きに対する判断理由'] = list(map(lambda x: x.replace('・', '') if type(x) == str else x, df['景気の先行きに対する判断理由']))
-        df = df[df['景気の先行きに対する判断理由'] != '＊']
-        df = df[df['景気の先行きに対する判断理由'] != '−']
-
-    # drop a row by condition
-    if region == 'all':
-        df = df.dropna(thresh=4)
-
-    if region == 'koshinetsu':
-        df = df.dropna(thresh=5)
-
-    # 業種・職種は別々のカラムを作ったので不要
-    df = df.drop(columns='業種・職種')
-
-    # 甲信越はスコア表記が他の地域と違う
-    if region == 'koshinetsu':
-        if pattern == 'current':
-            df['景気の現状判断'] = df['景気の現状判断'].fillna(method='ffill')
-            df['景気の現状判断'] = list(map(lambda x: KOSHINETSU_CONVERTER_CURRENT_MAP.get(x), df['景気の現状判断']))
-        else:
-            df['景気の先行き判断'] = df['景気の先行き判断'].fillna(method='ffill')
-            df['景気の先行き判断'] = list(map(lambda x: KOSHINETSU_CONVERTER_OUTLOOK_MAP.get(x), df['景気の先行き判断']))
-    else:
-        if pattern == 'current':
-            df['景気の現状判断'] = list(map(lambda x: CONVERTER_MAP.get(x), df['景気の現状判断']))
-        else:
-            df['景気の先行き判断'] = list(map(lambda x: CONVERTER_MAP.get(x), df['景気の先行き判断']))
-
-    if pattern == 'current':
-        df['タイプ'] = '現状'
-    else:
-        df['タイプ'] = '先行き'
-
-    df['日付'] = date
-
-    df = df.rename(columns=RENAME_COLUMNS)
-
-    return df
+def _get(url: str) -> Optional[object]:
+    return http_get(url, logger)
 
 
-def generate_hash(df: pd.DataFrame) -> List[str]:
-    hashes = []
-    for idx, row in df.iterrows():
-        xs = list(zip(row, row.index))
-        t = tuple(tuple(x) for x in xs)
-
-        r = ''.join(list(map(lambda t: str(t[0]), t)))
-        h = hashlib.md5(str.encode(r))
-
-        hashes.append(h.hexdigest())
-    return hashes
+def _enforce_supabase_ssl(db_url: str) -> str:
+    return enforce_supabase_ssl(db_url)
 
 
-def pattern_counter(series: pd.Series) -> Dict:
-    d: Dict = {}
-    for e in series:
-        d[e] = d.get(e, 0) + 1
-    return d
-
-
-def retrieve_csv_file(url: str) -> Optional[str]:
-    res = requests.get(url)
-    if res.status_code != 200:
-        return None
-
-    return _decode_csv_bytes(res.content)
+def _can_resolve_host(db_url: str) -> bool:
+    return can_resolve_host(db_url, logger)
 
 
 def construct_urls(today: str) -> List[Dict[str, str]]:
-    key = tuple(today.split('-'))
-    return [
-        {'pattern': 'outlook',
-         'url': 'https://www5.cao.go.jp/keizai3/%s/%s%swatcher/watcher5.csv' % key,
-         'header_skip': 7, 'region': 'all'},
-        {'pattern': 'current',
-         'url': 'https://www5.cao.go.jp/keizai3/%s/%s%swatcher/watcher4.csv' % key,
-         'header_skip': 7, 'region': 'all'},
-        {'pattern': 'outlook',
-         'url': 'https://www5.cao.go.jp/keizai3/%s/%s%swatcher/watcher7.csv' % key,
-         'header_skip': 2, 'region': 'koshinetsu'},
-        {'pattern': 'current',
-         'url': 'https://www5.cao.go.jp/keizai3/%s/%s%swatcher/watcher6.csv' % key,
-         'header_skip': 2, 'region': 'koshinetsu'}
-    ] # type: ignore
+    return build_source_urls(today, CSV_SOURCE_CONFIG)
 
 
 def construct_path() -> List[Dict[str, str]]:
     return [
-        {'pattern': 'outlook', 'header_skip': 7, 'region': 'all'},
-        {'pattern': 'current', 'header_skip': 7, 'region': 'all'},
-        {'pattern': 'outlook', 'header_skip': 2, 'region': 'koshinetsu'},
-        {'pattern': 'current', 'header_skip': 2, 'region': 'koshinetsu'}
-    ] # type: ignore
+        {'pattern': e['pattern'], 'header_skip': e['header_skip'], 'region': e['region']}
+        for e in CSV_SOURCE_CONFIG
+    ]
 
 
-def clean_data_frame(df: pd.DataFrame, pattern: str, region: str) -> pd.DataFrame:
-    # Remove unamed column
-    df = df.loc[:, ~df.columns.str.contains('^Unnamed')] # type: ignore
-    # Work on a copy to avoid chained assignment warnings
-    df = df.copy()
+def retrieve_csv_file(url: str) -> Optional[str]:
+    res = _get(url)
+    if res is None or res.status_code != 200:  # type: ignore[union-attr]
+        return None
+    return _decode_csv_bytes(res.content)  # type: ignore[union-attr]
 
-    if region == 'koshinetsu':
-        df['reason'] = ''
-
-    if pattern == 'outlook':
-        df['reason'] = ''
-
-    if pattern == 'outlook':
-        df["comments"] = ''
-        df["comments"] = df["reason_future"].apply(lambda x: '' if pd.isnull(x) else x) + df["comments"].apply(
-            lambda x: '' if pd.isnull(x) else x)
-
-    if pattern == 'outlook':
-        df['score'] = df['score_future'].apply(lambda x: 1.0 if pd.isnull(x) else x) * 1
-    else:
-        df['score'] = df['score_current'].apply(lambda x: 1.0 if pd.isnull(x) else x)
-
-    # Has just combined reason_future and comments, so drop reason_future
-    if pattern == 'outlook':
-        df = df.drop(columns=['reason_future', 'score_future', ])
-    else:
-        df = df.drop(columns=['score_current'])
-
-    df['id'] = generate_hash(
-        df[['dtype', 'category', 'reason', 'region', 'dt', 'comments',
-            'industry', 'score']]) # type: ignore
-
-    df = df.drop_duplicates(subset=['id'])
-
-    df = df.set_index('id', verify_integrity=True)
-
-    return df
-
-
-def construct_data_frame_v2(e: Dict[str, str], today_dt: datetime) -> Optional[pd.DataFrame]:
-    d = retrieve_csv_file(e['url'])
-    if d:
-        logger.info('doing url: %s' % e['url'])
-        df = create_dataframe(d, date=today_dt, header_skip=e['header_skip'], pattern=e['pattern'], region=e['region']) # type: ignore
-        if df is not None:
-            df = clean_data_frame(df, pattern=e['pattern'], region=e['region'])
-            return df
-    else:
-        logger.error('%s not available' % e['url'])
-    return None
 
 def create_file_name(url: str) -> str:
     url_parts = url.split('/')
-
-    # Extract the date and the number
     date = url_parts[-3:-1]
     number = url_parts[-1].replace('watcher', '').replace('.csv', '')
+    return '.'.join(date + [number]) + '.csv'
 
-    # Join them with periods to form the filename
-    file_name = '.'.join(date + [number])
-    return f"{file_name}.csv"
 
 def download_csv(url: str) -> Optional[str]:
-    res = requests.get(url)
-    if res.status_code != 200:
+    res = _get(url)
+    if res is None or res.status_code != 200:  # type: ignore[union-attr]
         return None
-
-    data = _decode_csv_bytes(res.content)
-
-    # save data to csv
-    # create a file name from url and save it. the url format is as follows:
-    # https://www5.cao.go.jp/keizai3/2024/0308watcher/watcher5.csv
-    # in this case, the file name is 2024.0308watcher.watch5.csv
+    data = _decode_csv_bytes(res.content)  # type: ignore[union-attr]
     file_name = create_file_name(url)
-
     with open(file_name, 'w', encoding='utf-8') as f:
         writer = csv.writer(f)
-        reader = csv.reader(data.splitlines())
-        for row in reader:
+        for row in csv.reader(data.splitlines()):
             writer.writerow(row)
     return file_name
 
-def _enforce_supabase_ssl(db_url: str) -> str:
-    try:
-        from urllib.parse import urlparse, urlunparse, urlencode, parse_qsl
-        parsed = urlparse(db_url)
-        if not parsed.hostname or 'supabase.co' not in parsed.hostname:
-            return db_url
-        # merge existing query params and add sslmode=require if missing
-        q = dict(parse_qsl(parsed.query))
-        if q.get('sslmode') is None:
-            q['sslmode'] = 'require'
-        new_query = urlencode(q)
-        return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment))
-    except Exception:
-        return db_url
 
+# ---------------------------------------------------------------------------
+# Pipeline orchestrator
+# ---------------------------------------------------------------------------
 
-def _can_resolve_host(db_url: str) -> bool:
-    try:
-        from urllib.parse import urlparse
-        import socket
-        host = urlparse(db_url).hostname
-        if not host:
-            return False
-        socket.gethostbyname(host)
-        return True
-    except Exception as e:
-        logger.error(f"DNS resolution failed for DB host: {e}")
-        return False
-
-
-def _upsert_valid_df(engine, df: pd.DataFrame, table_name: str, mode: str = 'nothing') -> int:
-    """Upsert `df` into Postgres using ON CONFLICT on primary key `id`.
-
-    Parameters
-    - engine: SQLAlchemy engine
-    - df: validated DataFrame with index 'id'
-    - table_name: destination table
-    - mode: 'nothing' → DO NOTHING (deduplicate only),
-            'update' → DO UPDATE (overwrite non-PK columns)
-
-    Returns the number of rows attempted (not necessarily affected rows).
-    """
-    if df is None or df.empty:
-        return 0
-    # Ensure 'id' is present as a column for insertion
-    records = df.reset_index().to_dict(orient='records')
-    metadata = MetaData()
-    with engine.begin() as conn:
-        tbl = Table(table_name, metadata, autoload_with=conn)
-        total = 0
-        chunk_size = 1000
-        for i in range(0, len(records), chunk_size):
-            chunk = records[i:i + chunk_size]
-            stmt = pg_insert(tbl).values(chunk)
-            if mode == 'update':
-                update_cols = {c.name: getattr(stmt.excluded, c.name)
-                               for c in tbl.columns if c.name != 'id'}
-                stmt = stmt.on_conflict_do_update(index_elements=['id'], set_=update_cols)
-            else:
-                stmt = stmt.on_conflict_do_nothing(index_elements=['id'])
-            conn.execute(stmt)
-            total += len(chunk)
-        return total
-
-
-def insert_data(target_date: str, dry_run: bool = False, MANUAL_RUN: bool = True) -> None:
+def insert_data(
+    target_date: str,
+    dry_run: bool = False,
+    MANUAL_RUN: bool = True,
+    *,
+    file_path_tpl: str = './%s_%s.csv',
+    db_url: str = '',
+) -> None:
+    """Run the 4-stage pipeline for target_date (format: YYYYMMDD)."""
     if MANUAL_RUN:
-        dt_str = target_date
-        today_dt = datetime.strptime(dt_str, '%Y%m%d')
-        today = datetime.strftime(today_dt, '%Y-%m-%d')
+        today_dt = datetime.strptime(target_date, '%Y%m%d')
+        today = today_dt.strftime('%Y-%m-%d')
     else:
-        # Use current date safely without strptime misuse
         today_dt = datetime.today()
         today = today_dt.strftime('%Y-%m-%d')
 
-    urls = construct_urls(today)
+    # Stage 1: Fetch
+    fetched = fetch_sources(today, CSV_SOURCE_CONFIG, logger)
 
-    dfs = []
-    for url in urls:
-        dfs.append(construct_data_frame_v2(url, today_dt))
+    # Stage 2: Transform
+    append_df = assemble_dataframes(fetched, today_dt, logger)
+    if append_df is None:
+        logger.warning(f"No dataframes were constructed for {today}. Nothing to save or insert.")
+        return
 
-    if len(dfs) >= 1:
-        append_df = pd.concat(dfs, sort=False)
-        # Validate with Pydantic models; split into valid and invalid sets
-        try:
-            valid_df, invalid_df, errors = validate_dataframe(append_df)
-            # Summarize validation outcome
-            valid_count = len(valid_df) if valid_df is not None else 0
-            invalid_count = len(invalid_df) if invalid_df is not None else 0
-            error_count = len(errors) if errors is not None else 0
-            logger.info(
-                f"Validation summary — valid: {valid_count}, invalid: {invalid_count}, errors: {error_count}"
-            )
-            if invalid_df is not None and not invalid_df.empty:
-                logger.warning(f"Found {invalid_count} invalid rows; they will be skipped from DB insert.")
-        except Exception as e:
-            logger.error(f"Validation failed before insert: {e}")
-            # If validation fails catastrophically, bail out to avoid corrupt data
-            return
-        
-        try:
-            logger.info('saving at %s' % file_path % ('append', today))
-            append_df.to_csv(file_path % ('append', today), encoding='utf-8')
-            # Also persist invalid rows if any for audit
-            if invalid_df is not None and not invalid_df.empty:
-                invalid_path = file_path % ('invalid', today)
-                invalid_df.to_csv(invalid_path, encoding='utf-8')
-                logger.info(f"invalid rows saved at {invalid_path}")
-            # Persist validation errors as structured logs (CSV and JSON)
-            try:
-                if errors is not None and len(errors) > 0:
-                    errors_path_csv = file_path % ('errors', today)
-                    # Reuse same template but ensure extension for JSON separately
-                    # Convert errors (list[dict]) to DataFrame for CSV
-                    err_df = pd.DataFrame(errors)
-                    err_df.to_csv(errors_path_csv, index=False, encoding='utf-8')
-                    errors_path_json = os.path.splitext(errors_path_csv)[0] + '.json'
-                    with open(errors_path_json, 'w', encoding='utf-8') as jf:
-                        json.dump(errors, jf, ensure_ascii=False, indent=2)
-                    # Log a short summary of most common error messages
-                    msgs = [e.get('errors', '') for e in errors]
-                    top = Counter(msgs).most_common(5)
-                    logger.info(f"Saved validation error logs: {errors_path_csv} and {errors_path_json}")
-                    logger.info("Top validation errors: " + "; ".join([f"{m} x{c}" for m, c in top]))
-            except Exception as le:
-                logger.warning(f"Failed to save error logs: {le}")
-            logger.debug('saving at %s' % file_path % ('append', today))
-        except Exception as e:
-            logger.error('error on creating a csv file: {0}'.format(e))
+    # Stage 3: Validate
+    try:
+        valid_df, invalid_df, errors = validate_dataframe(append_df)
+        valid_count = len(valid_df) if valid_df is not None else 0
+        invalid_count = len(invalid_df) if invalid_df is not None else 0
+        error_count = len(errors) if errors is not None else 0
+        logger.info(
+            f"Validation summary - valid: {valid_count}, invalid: {invalid_count}, errors: {error_count}"
+        )
+        if invalid_df is not None and not invalid_df.empty:
+            logger.warning(f"Found {invalid_count} invalid rows; they will be skipped from DB insert.")
+    except Exception as exc:
+        logger.error(f"Validation failed before insert: {exc}")
+        return
 
-        # Handle DB upsert unless dry run
-        if dry_run:
-            # Reuse previously computed counts if available; default to 0 when not set
-            try:
-                v_cnt, iv_cnt, err_cnt = valid_count, invalid_count, error_count
-            except NameError:
-                v_cnt = len(valid_df) if valid_df is not None else 0
-                iv_cnt = len(invalid_df) if invalid_df is not None else 0
-                err_cnt = len(errors) if errors is not None else 0
-            logger.info(
-                f"Dry run: skipping database upsert. CSV outputs and error logs have been written. "
-                f"Counts — valid: {v_cnt}, invalid: {iv_cnt}, errors logged: {err_cnt}"
+    # Stage 4a: Persist CSV
+    persist_csv(append_df, valid_df, invalid_df, errors, file_path_tpl, today, logger)
+
+    if dry_run:
+        logger.info(
+            f"Dry run: skipping database upsert. CSV outputs and error logs have been written. "
+            f"Counts - valid: {valid_count}, invalid: {invalid_count}, errors logged: {error_count}"
+        )
+        return
+
+    # Stage 4b: Persist DB
+    try:
+        safe_db_url = _enforce_supabase_ssl(db_url)
+        if not _can_resolve_host(safe_db_url):
+            logger.error(
+                "Cannot resolve database host. Check your internet/DNS settings or the DATABASE_URL hostname."
             )
             return
-        try:
-            # Ensure Supabase uses SSL and DNS resolves before connecting
-            safe_db_url = _enforce_supabase_ssl(DATABASE_URL)
-            if not _can_resolve_host(safe_db_url):
-                logger.error("Cannot resolve database host. Check your internet/DNS settings or the DATABASE_URL hostname.")
-                return
-            engine = create_engine(safe_db_url)
-            # Only insert validated rows
-            if valid_df is not None and not valid_df.empty:
-                upsert_mode = os.environ.get('UPSERT_MODE', 'nothing').lower()
-                attempted = _upsert_valid_df(engine, valid_df, os.environ['BUSINESS_WATCHER_BOT_TABLE_NAME'], upsert_mode)
-                logger.debug(f'validated records as of {today} attempted to upsert: {attempted} (mode={upsert_mode})')
-            else:
-                logger.warning('No valid rows to insert after validation.')
-        except Exception as e:
-            logger.error('error on insert (upsert): {0}'.format(e))
+        engine = create_engine(safe_db_url)
+        if valid_df is not None and not valid_df.empty:
+            upsert_mode = os.environ.get('UPSERT_MODE', 'nothing').lower()
+            attempted = persist_db(
+                engine, valid_df, os.environ['BUSINESS_WATCHER_BOT_TABLE_NAME'], upsert_mode
+            )
+            logger.debug(
+                f'validated records as of {today} attempted to upsert: {attempted} (mode={upsert_mode})'
+            )
+        else:
+            logger.warning('No valid rows to insert after validation.')
+    except Exception as exc:
+        logger.error(f'error on insert (upsert): {exc}')
 
+
+# ---------------------------------------------------------------------------
+# CLI entry point
+# ---------------------------------------------------------------------------
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Arguments of report downloader')
     parser.add_argument('target_dates', help='Set a target date to download data')
     parser.add_argument('--dry_run', help='set true if dry run (accepts 1/true/yes)')
-
     args = parser.parse_args()
 
-    # Load environment from .env if present (platform-agnostic)
     try:
-        # Attempts to load .env from project root; safe if file is missing
-        dotenv_path = join(dirname(__file__), '.env')
-        load_dotenv(dotenv_path)
+        load_dotenv(join(dirname(__file__), '.env'))
     except Exception:
         pass
 
-    # Platform-agnostic output directory
-    OUTPUT_DIR = os.environ.get("OUTPUT_DIR", "./")
+    OUTPUT_DIR = os.environ.get('OUTPUT_DIR', './')
     try:
         os.makedirs(OUTPUT_DIR, exist_ok=True)
     except Exception:
         logger.warning(f"Could not create output directory '{OUTPUT_DIR}'. Falling back to current directory.")
-        OUTPUT_DIR = "./"
+        OUTPUT_DIR = './'
     file_path = os.path.join(OUTPUT_DIR, '%s_%s.csv')
 
-    # Normalize DATABASE_URL without corrupting username or driver
-    raw_url = os.environ.get("DATABASE_URL", "")
-    DATABASE_URL = raw_url
-    if raw_url.startswith('postgres://'):
-        DATABASE_URL = 'postgresql+psycopg2://' + raw_url[len('postgres://'):]
-    elif raw_url.startswith('postgresql://'):
-        DATABASE_URL = 'postgresql+psycopg2://' + raw_url[len('postgresql://'):]
-    elif raw_url.startswith('postgresql+'):  # keep provided driver
-        DATABASE_URL = raw_url
-    else:
-        # Fallback: if user accidentally provided just 'postgres', upgrade safely
-        DATABASE_URL = raw_url.replace('postgres://', 'postgresql+psycopg2://', 1)
+    raw_url = os.environ.get('DATABASE_URL', '')
+    DATABASE_URL = enforce_supabase_ssl(normalize_database_url(raw_url))
 
-    # Enforce SSL for Supabase
-    DATABASE_URL = _enforce_supabase_ssl(DATABASE_URL)
-
-    # Lightweight log of target host for troubleshooting (no credentials)
     try:
-        from urllib.parse import urlparse
         parsed = urlparse(DATABASE_URL)
         logger.debug(f"DB host: {parsed.hostname}, port: {parsed.port}, db: {parsed.path.lstrip('/')}")
     except Exception:
         pass
 
     if not args.target_dates:
-        logger.info(
-            'please set target date. i.e., --target_dates=20200408. --target_dates=20200101,20200202 if more than two')
+        logger.info('please set target date. e.g. 20200408. Comma-separate multiple dates.')
 
     target_dates = args.target_dates.split(',')
     for target_date in target_dates:
-        is_dry = False
-        if args.dry_run is not None:
-            val = str(args.dry_run).strip().lower()
-            is_dry = val in ('1', 'true', 'yes', 'y')
-        if is_dry:
-            logger.info('running as dry run...')
-        else:
-            logger.info('running as prd run...')
-        insert_data(target_date, dry_run=is_dry)
+        is_dry = _truthy(args.dry_run)
+        logger.info('running as dry run...' if is_dry else 'running as prd run...')
+        insert_data(target_date, dry_run=is_dry, file_path_tpl=file_path, db_url=DATABASE_URL)
 
     # Note: Ensure the target date corresponds to an official release date for best results.

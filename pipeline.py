@@ -273,8 +273,19 @@ def persist_csv(
             errors_csv = file_path_tpl % ('errors', today)
             errors_json = os.path.splitext(errors_csv)[0] + '.json'
             pd.DataFrame(errors).to_csv(errors_csv, index=False, encoding='utf-8')
+
+            def _json_serial(obj):
+                if hasattr(obj, 'isoformat'):
+                    return obj.isoformat()
+                try:
+                    if isinstance(obj, float) and np.isnan(obj):
+                        return None
+                except Exception:
+                    pass
+                return str(obj)
+
             with open(errors_json, 'w', encoding='utf-8') as jf:
-                json.dump(errors, jf, ensure_ascii=False, indent=2)
+                json.dump(errors, jf, ensure_ascii=False, indent=2, default=_json_serial)
             top = Counter(e.get('errors', '') for e in errors).most_common(5)
             logger.info(f'Saved error logs: {errors_csv} and {errors_json}')
             logger.info('Top validation errors: ' + '; '.join(f'{m} x{c}' for m, c in top))

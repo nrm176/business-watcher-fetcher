@@ -1,0 +1,14 @@
+[
+  {
+    "index": "45519e974adeda97af805010f5598317",
+    "errors": "3 validation errors for WatcherRecord\nreason\n  Input should be a valid string [type=string_type, input_value=nan, input_type=float]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_type\nindustry_detail\n  Input should be a valid string [type=string_type, input_value=nan, input_type=float]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_type\npref\n  Input should be a valid string [type=string_type, input_value=nan, input_type=float]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_type",
+    "row": {
+      "id": "45519e974adeda97af805010f5598317",
+      "category": "家計動向関連",
+      "pref": NaN,
+      "region": "北海道",
+      "industry": "－",
+      "industry_detail": NaN,
+      "job_title": "－",
+      "dtype": "先行き",
+      "dt": 

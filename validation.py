@@ -19,6 +19,31 @@ class WatcherRecord(BaseModel):
     pref: Optional[str] = None
     score: float
 
+    @field_validator('reason', 'comments', 'industry', 'industry_detail', 'job_title', 'pref', mode='before')
+    @classmethod
+    def coerce_missing_to_none(cls, v):
+        """Accept numpy nan, pandas NA/NaT, and empty strings as None.
+
+        Needed because pandas 2.x StringDtype columns reconvert None back to nan
+        during DataFrame column assignment, so pre-processing in validate_dataframe
+        cannot reliably produce Python None for these fields.
+        """
+        if v is None:
+            return None
+        # numpy nan (float where nan != nan)
+        if isinstance(v, float) and v != v:
+            return None
+        # pandas NA / NaT (identity check avoids importing pandas at class definition)
+        try:
+            import pandas as _pd
+            if v is _pd.NA or v is _pd.NaT:
+                return None
+        except Exception:
+            pass
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
+
     @field_validator('id')
     def id_is_hex(cls, v: str) -> str:
         if not isinstance(v, str) or len(v) != 32:
@@ -79,10 +104,12 @@ def validate_dataframe(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, Li
     optional_text_cols = ['industry', 'industry_detail', 'job_title', 'pref', 'comments', 'reason']
     for col in optional_text_cols:
         if col in work_df.columns:
-            # Convert NaN to None
-            work_df[col] = work_df[col].where(~work_df[col].isna(), None)
-            # Normalize empty strings to None as well
-            work_df[col] = work_df[col].apply(lambda x: None if isinstance(x, str) and x.strip() == '' else x)
+            # Use list comprehension — Series.where(cond, None) silently keeps np.nan
+            # in pandas 2.x for object-typed columns, so we convert explicitly here.
+            work_df[col] = [
+                None if pd.isna(x) else (None if isinstance(x, str) and x.strip() == '' else x)
+                for x in work_df[col]
+            ]
 
     val_rows = []
     bad_rows = []
